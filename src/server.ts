@@ -10,6 +10,15 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Health Check Endpoint
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    service: 'PostPilot Agent'
+  });
+});
+
 const HMAC_SECRET = process.env.HMAC_SECRET as string;
 if (!HMAC_SECRET) {
   throw new Error("Missing HMAC_SECRET in environment variables");
@@ -216,6 +225,8 @@ app.post('/api/retries/process', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
+  console.log(`📍 [URL] https://postpilot-production-c051.up.railway.app/`);
   logger.info(`Server started on port ${PORT}`);
 });
 
