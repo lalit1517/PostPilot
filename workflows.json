@@ -1,0 +1,147 @@
+{
+  "name": "X Agent Workflows",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8,14,20 * * *"
+            }
+          ]
+        }
+      },
+      "id": "1d8ea8f3-42e1-4564-9076-26fbbeb265e3",
+      "name": "Cron (Generate)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://heavy-planets-turn.loca.lt/api/generate",
+        "sendHeaders": false,
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "time_of_day",
+              "value": "={{ $now.hour < 12 ? 'morning' : ($now.hour < 18 ? 'afternoon' : 'night') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "78bda043-34e8-4228-b8bc-a887b64f9e1e",
+      "name": "Generate Tweet",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        420,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "agent@myxagent.com",
+        "toEmail": "admin@myxagent.com",
+        "subject": "Waiting for Approval: New X Post Generation",
+        "html": "=<p>New Draft Generated via LangGraph:</p><blockquote>{{ $json.draft }}</blockquote><p><a href=\"{{ $json.approveUrl }}\">Review and Approve</a></p>",
+        "options": {}
+      },
+      "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "*/15 * * * *"
+            }
+          ]
+        }
+      },
+      "id": "b9ebda7e-bc86-4bed-aec9-6dbd08794c48",
+      "name": "Cron (Retry Queue)",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        200,
+        420
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://heavy-planets-turn.loca.lt/api/retries/process",
+        "options": {}
+      },
+      "id": "b6f00f07-de80-4911-aa9b-5fb8995aeeef",
+      "name": "Process Retries",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        420,
+        420
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cron (Generate)": {
+      "main": [
+        [
+          {
+            "node": "Generate Tweet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Tweet": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cron (Retry Queue)": {
+      "main": [
+        [
+          {
+            "node": "Process Retries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f7d383b1-a6b1-460d-9bcf-168a6fcfcefc",
+  "meta": {
+    "instanceId": "e1f13ce599b45610815467ec6b66ddb48"
+  },
+  "tags": []
+}

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #f7f9fa; margin: 0; padding: 20px; color: #0f1419; }
+    .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 16px; overflow: hidden; box-shadow: 0 0 15px rgba(0,0,0,0.05); }
+    .header { background: #1DA1F2; color: #fff; padding: 20px; text-align: center; }
+    .header h2 { margin: 0; font-size: 24px; }
+    .content { padding: 30px; }
+    .tweet-box { background: #f5f8fa; border-left: 4px solid #1DA1F2; padding: 20px; font-size: 18px; line-height: 1.5; margin-bottom: 25px; border-radius: 0 8px 8px 0; }
+    .metadata { color: #536471; font-size: 14px; margin-bottom: 30px; }
+    .actions { display: flex; flex-direction: column; gap: 15px; }
+    .btn { display: block; text-align: center; text-decoration: none; padding: 14px 20px; font-size: 16px; font-weight: bold; border-radius: 9999px; }
+    .btn-primary { background: #1DA1F2; color: white; }
+    .btn-secondary { background: white; color: #0f1419; border: 1px solid #cfd9de; }
+    .btn-danger { background: white; color: #f4212e; border: 1px solid #f4212e; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h2>New Agent Draft Ready</h2>
+    </div>
+    <div class="content">
+      <div class="tweet-box">
+        {{ draft_content }}
+      </div>
+      <div class="metadata">
+        Generated for: <strong>{{ time_of_day }}</strong> | AI Confidence Score: <strong>{{ score }}/10</strong>
+      </div>
+      <div class="actions">
+        <!-- The approval link goes to the confirmation UI for safe POSTing -->
+        <a href="{{ approve_url }}" class="btn btn-primary">✅ Review & Approve</a>
+        
+        <!-- Assuming these link to simple feedback forms hosted on the backend -->
+        <a href="{{ base_url }}/api/edit-form?id={{ tweet_id }}&token={{ token }}" class="btn btn-secondary">✏️ Override Topic</a>
+        <a href="{{ base_url }}/api/feedback-form?id={{ tweet_id }}&token={{ token }}" class="btn btn-danger">💬 Request Rewrite (Feedback)</a>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
