@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Tweet {
+  id             String         @id @default(uuid())
+  original_topic String
+  edited_topic   String?
+  time_of_day    String
+  score          Float
+  posted         Boolean        @default(false)
+  x_tweet_id     String?        // Null until successfully posted
+  status         String         @default("PENDING") // PENDING, POSTED, ERROR
+  created_at     DateTime       @default(now())
+  
+  versions       TweetVersion[]
+  feedbacks      Feedback[]
+  engagement     Engagement?
+}
+
+model TweetVersion {
+  id         String   @id @default(uuid())
+  tweet_id   String
+  content    String
+  version    Int      @default(1)
+  critique   String?
+  created_at DateTime @default(now())
+  
+  tweet      Tweet    @relation(fields: [tweet_id], references: [id])
+}
+
+model Feedback {
+  id            String   @id @default(uuid())
+  tweet_id      String
+  feedback_text String
+  created_at    DateTime @default(now())
+  
+  tweet         Tweet    @relation(fields: [tweet_id], references: [id])
+}
+
+model RetryQueue {
+  id          String   @id @default(uuid())
+  task_type   String   // e.g., "POST_TO_X", "SEND_EMAIL"
+  payload     Json     // Payload of the task
+  attempts    Int      @default(0)
+  max_retries Int      @default(3)
+  status      String   @default("PENDING") // PENDING, FAILED, COMPLETED
+  last_error  String?
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+}
+
+model Engagement {
+  id          String   @id @default(uuid())
+  tweet_id    String   @unique
+  likes       Int      @default(0)
+  retweets    Int      @default(0)
+  impressions Int      @default(0)
+  fetched_at  DateTime @default(now())
+  
+  tweet       Tweet    @relation(fields: [tweet_id], references: [id])
+}
