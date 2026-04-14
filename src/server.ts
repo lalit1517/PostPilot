@@ -43,12 +43,14 @@ app.post('/api/generate', async (req, res) => {
     const { time_of_day = 'morning', topic } = req.body || {};
     logger.info({ time_of_day, topic }, 'Generate request received');
 
+    const startAgent = Date.now();
     // Run LangGraph Agent
     const finalState = await agentGraph.invoke({
       timeOfDay: time_of_day,
       topic: topic,
       iterationCount: 0
     });
+    logger.info({ agentDuration: `${Date.now() - startAgent}ms` }, 'Agent workflow completed');
 
     const tweetDraft = finalState.draft;
     const finalTopic = finalState.topic;
@@ -226,8 +228,15 @@ app.post('/api/retries/process', async (req, res) => {
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
-  console.log(`📍 [URL] https://postpilot-production-c051.up.railway.app/`);
-  logger.info(`Server started on port ${PORT}`);
+  console.log(`📍 [URL] ${process.env.BASE_URL || 'http://localhost:3000'}`);
+  
+  if (!process.env.BASE_URL) {
+    console.warn(`⚠️ [WARNING] BASE_URL is NOT set. Links will default to localhost.`);
+  } else {
+    console.log(`✅ [CONFIG] BASE_URL is set to: ${process.env.BASE_URL}`);
+  }
+
+  logger.info({ PORT, BASE_URL: process.env.BASE_URL }, "Server started with diagnostics");
 });
 
 // Prevent silent exit in some environments

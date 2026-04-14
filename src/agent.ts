@@ -29,19 +29,23 @@ const baseConfig = {
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
   model: "gemini-3.1-flash-lite-preview", 
+  timeout: 60000, // 60s safety timeout to prevent hangs
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
     model: "gemini-3-flash-preview",
+    timeout: 60000,
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
     model: "gemini-2.5-flash",
+    timeout: 60000,
   }),
 ]);
 
 async function contextLoader(state: typeof AgentState.State) {
-  logger.info("Running contextLoader");
+  const start = Date.now();
+  logger.info("Running contextLoader...");
   const topTweetsQuery = await prisma.engagement.findMany({
     orderBy: { likes: 'desc' },
     take: 5,
@@ -62,6 +66,7 @@ async function contextLoader(state: typeof AgentState.State) {
   });
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
 
+  logger.info({ duration: `${Date.now() - start}ms` }, "Finished contextLoader");
   return { context, recentFeedback, recentTopics, iterationCount: state.iterationCount || 0 };
 }
 
@@ -84,7 +89,8 @@ Output MUST be plain text. No markdown, no bolding (**), no hashtags.`;
 }
 
 async function contentGenerator(state: typeof AgentState.State) {
-  logger.info({ topic: state.topic }, "Running contentGenerator (LLM Call 1)");
+  const start = Date.now();
+  logger.info({ topic: state.topic }, "Running contentGenerator (LLM Call 1)...");
   
   const prompt = `${state.personaParameters}
 ${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}
@@ -99,6 +105,7 @@ Constraints: Plain text only, no markdown, no emojis.`;
   const topic = (parts[0] || 'Topic').trim();
   const draft = parts.slice(1).join('|').trim();
   
+  logger.info({ duration: `${Date.now() - start}ms` }, "Finished contentGenerator");
   return { topic, draft, iterationCount: 1 };
 }
 
