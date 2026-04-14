@@ -19,7 +19,7 @@ const AgentState = Annotation.Root({
 
 // User requested Gemini 3 Flash with specific generation config
 const llm = new ChatGoogleGenerativeAI({
-  model: "gemini-3.1-flash-lite", 
+  model: "gemini-3.1-flash-lite-preview", 
   apiKey: process.env.GOOGLE_API_KEY as string,
   temperature: 1.8,
   maxOutputTokens: 300,
