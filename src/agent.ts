@@ -17,14 +17,28 @@ const AgentState = Annotation.Root({
   iterationCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
 });
 
-// User requested Gemini 3 Flash with specific generation config
-const llm = new ChatGoogleGenerativeAI({
-  model: "gemini-3.1-flash-lite-preview", 
+// Config for all models 
+const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
   temperature: 1.8,
   maxOutputTokens: 300,
   topP: 0.95,
-});
+};
+
+// Initialize the primary model with fallbacks
+const llm = new ChatGoogleGenerativeAI({
+  ...baseConfig,
+  model: "gemini-3.1-flash-lite-preview", 
+}).withFallbacks([
+  new ChatGoogleGenerativeAI({
+    ...baseConfig,
+    model: "gemini-3-flash-preview",
+  }),
+  new ChatGoogleGenerativeAI({
+    ...baseConfig,
+    model: "gemini-2.5-flash",
+  }),
+]);
 
 async function contextLoader(state: typeof AgentState.State) {
   logger.info("Running contextLoader");
