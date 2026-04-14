@@ -29,17 +29,14 @@ const baseConfig = {
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
   model: "gemini-3.1-flash-lite-preview", 
-  timeout: 60000, // 60s safety timeout to prevent hangs
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
     model: "gemini-3-flash-preview",
-    timeout: 60000,
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
     model: "gemini-2.5-flash",
-    timeout: 60000,
   }),
 ]);
 
@@ -100,7 +97,7 @@ Example: AI Ethics|Why we need to talk about data bias...
 
 Constraints: Plain text only, no markdown, no emojis.`;
 
-  const res = await llm.invoke(prompt);
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
   const parts = (res.content as string).split('|');
   const topic = (parts[0] || 'Topic').trim();
   const draft = parts.slice(1).join('|').trim();
@@ -113,7 +110,7 @@ async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
   const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
   
-  const res = await llm.invoke(prompt);
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
   const parts = (res.content as string).split('|');
   const score = parseFloat(parts[0] || '0') || 0;
   const critique = parts[1] || '';
@@ -128,7 +125,7 @@ async function autoRefiner(state: typeof AgentState.State) {
   logger.info({ score: state.score }, "Running autoRefiner (LLM Call 3)");
   const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}`;
   
-  const res = await llm.invoke(prompt);
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
   return { draft: res.content as string, iterationCount: 2 };
 }
 
