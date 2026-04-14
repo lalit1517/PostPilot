@@ -80,7 +80,8 @@ AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.
 Apply this recent feedback rigorously: ${state.recentFeedback.join('; ')}
 
 Do not use typical AI markers (emojis like 🚀, words like "delve").
-Output MUST be plain text. No markdown, no bolding (**), no hashtags.`;
+Output MUST be plain text. No markdown, no bolding (**), no hashtags.
+STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.`;
 
   return { personaParameters };
 }
@@ -95,7 +96,7 @@ Target: Generate both a Topic and a Draft.
 Output Format: TOPIC|DRAFT
 Example: AI Ethics|Why we need to talk about data bias...
 
-Constraints: Plain text only, no markdown, no emojis.`;
+Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
 
   const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
   const parts = (res.content as string).split('|');
