@@ -99,11 +99,18 @@ Example: AI Ethics|Why we need to talk about data bias...
 Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
 
   const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
-  const parts = (res.content as string).split('|');
-  const topic = (parts[0] || 'Topic').trim();
-  const draft = parts.slice(1).join('|').trim();
+  const content = (res.content as string).trim();
   
-  logger.info({ duration: `${Date.now() - start}ms` }, "Finished contentGenerator");
+  let topic = "AI Generated";
+  let draft = content;
+
+  if (content.includes('|')) {
+    const parts = content.split('|');
+    topic = parts[0].trim();
+    draft = parts.slice(1).join('|').trim();
+  }
+
+  logger.info({ topic, draftLength: draft.length }, "Parsed AI Generation");
   return { topic, draft, iterationCount: 1 };
 }
 
