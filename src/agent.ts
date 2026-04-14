@@ -28,15 +28,15 @@ const baseConfig = {
 // Initialize the primary model with fallbacks
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-3.1-flash-lite-preview", 
+  model: "gemini-2.5-flash", 
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-3-flash-preview",
+    model: "gemini-2-flash",
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-2.5-flash",
+    model: "gemini-1.5-flash",
   }),
 ]);
 
