@@ -12,8 +12,8 @@ app.use(express.urlencoded({ extended: true }));
 
 // Health Check Endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     timestamp: new Date().toISOString(),
     service: 'PostPilot Agent'
   });
@@ -141,7 +141,7 @@ app.post('/api/approve', async (req, res) => {
     res.json({ success: true, url: `https://x.com/user/status/${xId}` });
   } catch (error: any) {
     logger.error({ tweet_id: id, err: error.message }, 'Failed to post directly, moving to retry queue');
-    
+
     await prisma.retryQueue.create({
       data: {
         task_type: 'POST_TO_X',
@@ -210,7 +210,7 @@ app.post('/api/retries/process', async (req, res) => {
       } catch (err: any) {
         await prisma.retryQueue.update({
           where: { id: task.id },
-          data: { 
+          data: {
             attempts: task.attempts + 1,
             last_error: err.message,
             status: task.attempts + 1 >= task.max_retries ? 'FAILED' : 'PENDING'
@@ -223,7 +223,7 @@ app.post('/api/retries/process', async (req, res) => {
   res.json({ success: true, processed: pendingTasks.length });
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
   console.log(`📍 [URL] https://postpilot-production-c051.up.railway.app/`);
