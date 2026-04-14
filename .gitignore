@@ -7,3 +7,4 @@ build
 .next
 .DS_Store
 *.log
+scratch/
