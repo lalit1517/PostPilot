@@ -86,9 +86,10 @@ Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.
 Apply this recent feedback rigorously: ${state.recentFeedback.join('; ')}
 
-Do not use typical AI markers (emojis like 🚀, words like "delve").
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
-STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.`;
+STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
+NEVER end mid-sentence. Every response MUST be a complete thought with a closing period.
+DO NOT include any preamble like "Here is your tweet" or "Draft:". Just the content.`;
 
   return { personaParameters };
 }
@@ -99,11 +100,14 @@ async function contentGenerator(state: typeof AgentState.State) {
 
   const prompt = `${state.personaParameters}
 ${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}
-Target: Generate both a Topic and a Draft.
+Target: Generate both a Topic and a Draft. 
 Output Format: TOPIC|DRAFT
-Example: AI Ethics|Why we need to talk about data bias...
 
-Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
+CRITICAL: DO NOT include the words "Topic:" or "Draft:" in the output. Just the data separated by "|".
+Example: AI Ethics|Why we need to talk about data bias. We must act now.
+
+Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no emojis. 
+Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
 
   try {
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
@@ -149,7 +153,7 @@ async function qualityScorer(state: typeof AgentState.State) {
 
 async function autoRefiner(state: typeof AgentState.State) {
   logger.info({ score: state.score }, "Running autoRefiner (LLM Call 3)");
-  const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}`;
+  const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}\n\nSTRICT: Ensure the new version is a full, finished tweet that ends with a period. No incomplete sentences. No intro text. Just the tweet.`;
 
   try {
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
