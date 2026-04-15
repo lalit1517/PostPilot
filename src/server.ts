@@ -44,12 +44,16 @@ app.post('/api/generate', async (req, res) => {
     logger.info({ time_of_day, topic }, 'Generate request received');
 
     const startAgent = Date.now();
-    // Run LangGraph Agent
-    const finalState = await agentGraph.invoke({
-      timeOfDay: time_of_day,
-      topic: topic,
-      iterationCount: 0
-    });
+    // Run LangGraph Agent with a safety timeout wrapper
+    const finalState = await Promise.race([
+      agentGraph.invoke({
+        timeOfDay: time_of_day,
+        topic: topic,
+        iterationCount: 0
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Global Workflow Timeout")), 55_000))
+    ]) as any;
+    
     logger.info({ agentDuration: `${Date.now() - startAgent}ms` }, 'Agent workflow completed');
 
     const tweetDraft = finalState.draft;
@@ -98,6 +102,17 @@ app.post('/api/generate', async (req, res) => {
     });
   } catch (err: any) {
     logger.error({ err: err.message, stack: err.stack }, 'Failed to generate tweet');
+    
+    // Permanent Fix: If we hit a timeout, try to return a generic fallback so the client doesn't 500
+    if (err.message.includes('timeout') || err.message.includes('aborted')) {
+      return res.status(200).json({
+        success: false,
+        error: "Generation is taking longer than expected. Please try a specific topic.",
+        draft: "Technical insight: Focus on modular architecture for long-term scalability. Avoid tight coupling in distributed systems.",
+        retryPossible: true
+      });
+    }
+    
     res.status(500).json({ error: err.message });
   }
 });
