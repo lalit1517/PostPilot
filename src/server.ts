@@ -88,6 +88,8 @@ app.post('/api/generate', async (req, res) => {
       success: true,
       tweet_id: tweet.id,
       draft: tweetDraft,
+      time_of_day,
+      score: tweet.score,
       intentUrl,
       editUrl: `${baseUrl}/api/view-edit?id=${tweet.id}&token=${approveToken}`,
       feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweet.id}&token=${approveToken}`,
