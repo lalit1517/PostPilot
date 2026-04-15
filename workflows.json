@@ -1,5 +1,5 @@
 {
-  "name": "X Agent Workflows",
+  "name": "PostPilot",
   "nodes": [
     {
       "parameters": {
@@ -12,7 +12,7 @@
           ]
         }
       },
-      "id": "1d8ea8f3-42e1-4564-9076-26fbbeb265e3",
+      "id": "cron-generate",
       "name": "Cron (Generate)",
       "type": "n8n-nodes-base.cron",
       "typeVersion": 1,
@@ -25,7 +25,6 @@
       "parameters": {
         "method": "POST",
         "url": "https://postpilot-production-c051.up.railway.app/api/generate",
-        "sendHeaders": false,
         "sendBody": true,
         "bodyParameters": {
           "parameters": [
@@ -34,10 +33,9 @@
               "value": "={{ $now.hour < 12 ? 'morning' : ($now.hour < 18 ? 'afternoon' : 'night') }}"
             }
           ]
-        },
-        "options": {}
+        }
       },
-      "id": "78bda043-34e8-4228-b8bc-a887b64f9e1e",
+      "id": "generate",
       "name": "Generate Tweet",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
@@ -48,19 +46,46 @@
     },
     {
       "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "wait",
+      "name": "Wait (Agent Processing)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [
+        640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://postpilot-production-c051.up.railway.app/api/status?id=' + $json.jobId }}"
+      },
+      "id": "status",
+      "name": "Check Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        860,
+        200
+      ]
+    },
+    {
+      "parameters": {
         "chatId": "861708547",
-        "text": "=🚀 **New X Post Draft**\n---\nDraft: *{{ $json.draft }}*\nTime: {{ $json.time_of_day || 'Not set' }}\nScore: {{ $json.score || 0 }}/10\n---",
+        "text": "=🚀 New X Post Draft\n---\nDraft: {{ $json.draft }}\nScore: {{ $json.score }}/10\n---",
         "additionalFields": {
-          "parse_mode": "Markdown",
-          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.editUrl || 'https://google.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.feedbackUrl || 'https://google.com') }],\n    [\n      { \"text\": \"✅ I've Posted This\", \"callback_data\": \"pc:\" + ($json.tweet_id || '') + \":\" + (($json.token || '').substring(0, 16)) },\n      { \"text\": \"📋 Copy Tweet\", \"callback_data\": \"ct:\" + ($json.tweet_id || '') + \":\" + (($json.token || '').substring(0, 16)) }\n    ]\n  ]\n}) }}"
+          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.intentUrl || 'https://twitter.com') }]\n  ]\n}) }}"
         }
       },
-      "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",
+      "id": "telegram",
       "name": "Telegram (Notification)",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1,
       "position": [
-        640,
+        1080,
         200
       ]
     },
@@ -75,7 +100,7 @@
           ]
         }
       },
-      "id": "b9ebda7e-bc86-4bed-aec9-6dbd08794c48",
+      "id": "cron-retry",
       "name": "Cron (Retry Queue)",
       "type": "n8n-nodes-base.cron",
       "typeVersion": 1,
@@ -87,10 +112,9 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://postpilot-production-c051.up.railway.app/api/retries/process",
-        "options": {}
+        "url": "https://postpilot-production-c051.up.railway.app/api/retries/process"
       },
-      "id": "b6f00f07-de80-4911-aa9b-5fb8995aeeef",
+      "id": "retry",
       "name": "Process Retries",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.1,
@@ -100,7 +124,6 @@
       ]
     }
   ],
-  "pinData": {},
   "connections": {
     "Cron (Generate)": {
       "main": [
@@ -114,6 +137,28 @@
       ]
     },
     "Generate Tweet": {
+      "main": [
+        [
+          {
+            "node": "Wait (Agent Processing)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait (Agent Processing)": {
+      "main": [
+        [
+          {
+            "node": "Check Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Status": {
       "main": [
         [
           {
@@ -136,13 +181,8 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
-  },
-  "versionId": "f7d383b1-a6b1-460d-9bcf-168a6fcfcefc",
-  "meta": {
-    "instanceId": "e1f13ce599b45610815467ec6b66ddb48"
-  },
-  "tags": []
+  }
 }
