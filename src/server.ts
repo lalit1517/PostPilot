@@ -46,87 +46,65 @@ function verifyToken(id: string, token: string) {
 app.post('/api/generate', async (req, res) => {
   try {
     const { time_of_day = 'morning', topic } = req.body || {};
+
     logger.info({ time_of_day, topic }, 'Generate request received');
 
-    const startAgent = Date.now();
-
-    function timeoutPromise(ms: number) {
-      return new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Agent hard timeout exceeded")), ms)
-      );
-    }
-
-    // 🔥 HARD TIMEOUT PROTECTION (CRITICAL FIX)
-    const finalState = await Promise.race([
-      agentGraph.invoke({
-        timeOfDay: time_of_day,
-        topic,
-        iterationCount: 0,
-        deadline: Date.now() + 50000,
-      }),
-      timeoutPromise(55000)
-    ]);
-
-    logger.info(
-      { agentDuration: `${Date.now() - startAgent}ms` },
-      'Agent workflow completed'
-    );
-
-    const tweetDraft = finalState.draft;
-    const finalTopic = finalState.topic;
-
-    /* ---------------- DB SAVE ---------------- */
-
+    // ✅ CREATE JOB (DB)
     const tweet = await prisma.tweet.create({
       data: {
-        original_topic: topic || finalTopic || "AI Generated",
+        original_topic: topic || "Processing",
         time_of_day,
-        score: finalState.score || 0,
-        status: 'PENDING',
+        status: 'PROCESSING',
+      }
+    });
+
+    // ✅ INSTANT RESPONSE
+    res.json({
+      success: true,
+      jobId: tweet.id,
+      status: 'PROCESSING'
+    });
+
+    // ✅ BACKGROUND EXECUTION
+    setImmediate(() => {
+      runAgent(tweet.id, time_of_day, topic)
+        .catch(err => logger.error("Background job crash", err));
+    });
+
+  } catch (err: any) {
+    logger.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/status', async (req, res) => {
+  try {
+    const { id } = req.query;
+
+    const tweet = await prisma.tweet.findUnique({
+      where: { id: String(id) },
+      include: {
         versions: {
-          create: {
-            content: tweetDraft,
-            version: 1,
-            critique: finalState.critique
-          }
+          orderBy: { version: 'desc' },
+          take: 1
         }
       }
     });
 
-    const approveToken = generateToken(tweet.id);
-    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-
-    const encodedTweet = encodeURIComponent(tweetDraft);
-    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
-
-    await prisma.tweet.update({
-      where: { id: tweet.id },
-      data: { intent_url: intentUrl }
-    });
-
-    /* ---------------- RESPONSE ---------------- */
+    if (!tweet) {
+      return res.status(404).json({ error: "Not found" });
+    }
 
     res.json({
-      success: true,
+      status: tweet.status,
       tweet_id: tweet.id,
-      draft: tweetDraft,
-      time_of_day,
+      draft: tweet.versions[0]?.content || null,
       score: tweet.score,
-      intentUrl,
-      editUrl: `${baseUrl}/api/view-edit?id=${tweet.id}&token=${approveToken}`,
-      feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweet.id}&token=${approveToken}`,
-      token: approveToken
+      intentUrl: tweet.intent_url
     });
 
   } catch (err: any) {
-    logger.error(
-      { err: err.message, stack: err.stack },
-      'Failed to generate tweet'
-    );
-
-    res.status(500).json({
-      error: err.message || "Unknown error",
-    });
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -236,6 +214,59 @@ app.post('/api/retries/process', async (req, res) => {
   logger.info("Processing retry queue");
   res.json({ success: true, processed: 0 });
 });
+
+async function runAgent(id: string, timeOfDay: string, topic?: string) {
+  try {
+    logger.info(`Starting job ${id}`);
+
+    const result: any = await Promise.race([
+      agentGraph.invoke({
+        timeOfDay,
+        topic: topic ?? "",
+        iterationCount: 0,
+        deadline: Date.now() + 50000
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Worker timeout")), 55000)
+      )
+    ]);
+
+    const tweetDraft = result?.draft || "Fallback: Keep building.";
+    const finalTopic = result?.topic || "AI Generated";
+
+    const encodedTweet = encodeURIComponent(tweetDraft);
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
+
+    await prisma.tweet.update({
+      where: { id },
+      data: {
+        original_topic: topic || finalTopic || "AI Generated",
+        score: result.score || 0,
+        status: 'PENDING',
+        intent_url: intentUrl,
+        versions: {
+          create: {
+            content: tweetDraft,
+            version: 1,
+            critique: result.critique || ""
+          }
+        }
+      }
+    });
+
+    logger.info(`Job ${id} completed`);
+
+  } catch (err) {
+    logger.error(`Job ${id} failed`);
+
+    await prisma.tweet.update({
+      where: { id },
+      data: {
+        status: 'ERROR'
+      }
+    });
+  }
+}
 
 /* ---------------- START SERVER ---------------- */
 

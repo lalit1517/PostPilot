@@ -12,7 +12,7 @@ model Tweet {
   original_topic String
   edited_topic   String?
   time_of_day    String
-  score          Float
+  score          Float          @default(0)
   posted         Boolean        @default(false)
   x_tweet_id     String?        // Null until successfully posted
   status         String         @default("PENDING") // PENDING, APPROVED, POSTED_CONFIRMED, ERROR
