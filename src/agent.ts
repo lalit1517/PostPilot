@@ -24,7 +24,7 @@ const baseConfig = {
   temperature: 0.7, // Lowered significantly: limits hallucination and trailing commas
   maxOutputTokens: 500,
   topP: 0.9,
-  maxRetries: 3, // Increased retry attempts for API latency
+  maxRetries: 5, // Increased retry attempts for API latency
 };
 
 const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety buffer
