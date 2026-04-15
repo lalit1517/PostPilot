@@ -52,6 +52,7 @@
     },
     {
       "parameters": {
+        "httpMethod": "POST",
         "path": "tweet-ready",
         "options": {}
       },
