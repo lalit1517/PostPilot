@@ -9,8 +9,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-/* ---------------- HEALTH ---------------- */
-
+// Health Check Endpoint
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
@@ -18,8 +17,6 @@ app.get('/', (req, res) => {
     service: 'PostPilot Agent'
   });
 });
-
-/* ---------------- SECURITY ---------------- */
 
 const HMAC_SECRET = process.env.HMAC_SECRET as string;
 if (!HMAC_SECRET) {
@@ -36,82 +33,80 @@ function verifyToken(id: string, token: string) {
     const expected = generateToken(id).substring(0, token.length);
     if (token.length < 16 || expected.length !== token.length) return false;
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token));
-  } catch {
+  } catch (err) {
     return false;
   }
 }
 
-/* ---------------- GENERATE (FIXED) ---------------- */
-
 app.post('/api/generate', async (req, res) => {
   try {
     const { time_of_day = 'morning', topic } = req.body || {};
-
     logger.info({ time_of_day, topic }, 'Generate request received');
 
-    // ✅ CREATE JOB (DB)
+    const startAgent = Date.now();
+    // Run LangGraph Agent
+    const finalState = await agentGraph.invoke({
+      timeOfDay: time_of_day,
+      topic: topic,
+      iterationCount: 0
+    });
+    logger.info({ agentDuration: `${Date.now() - startAgent}ms` }, 'Agent workflow completed');
+
+    const tweetDraft = finalState.draft;
+    const finalTopic = finalState.topic;
+
+    // Create Base Tweet
     const tweet = await prisma.tweet.create({
       data: {
-        original_topic: topic || "Processing",
+        original_topic: topic || finalTopic || "AI Generated",
         time_of_day,
-        status: 'PROCESSING',
-      }
-    });
-
-    // ✅ INSTANT RESPONSE
-    res.json({
-      success: true,
-      jobId: tweet.id,
-      status: 'PROCESSING'
-    });
-
-    // ✅ BACKGROUND EXECUTION
-    setImmediate(() => {
-      runAgent(tweet.id, time_of_day, topic)
-        .catch(err => logger.error("Background job crash", err));
-    });
-
-  } catch (err: any) {
-    logger.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/status', async (req, res) => {
-  try {
-    const { id } = req.query;
-
-    const tweet = await prisma.tweet.findUnique({
-      where: { id: String(id) },
-      include: {
+        score: finalState.score || 0,
+        status: 'PENDING',
         versions: {
-          orderBy: { version: 'desc' },
-          take: 1
+          create: {
+            content: tweetDraft,
+            version: 1,
+            critique: finalState.critique
+          }
         }
       }
     });
 
-    if (!tweet) {
-      return res.status(404).json({ error: "Not found" });
-    }
+    const approveToken = generateToken(tweet.id);
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
 
-    res.json({
-      status: tweet.status,
-      tweet_id: tweet.id,
-      draft: tweet.versions[0]?.content || null,
-      score: tweet.score,
-      intentUrl: tweet.intent_url
+    // Generate Intent URL
+    const encodedTweet = encodeURIComponent(tweetDraft);
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
+
+    // Update tweet with intent_url
+    await prisma.tweet.update({
+      where: { id: tweet.id },
+      data: { intent_url: intentUrl }
     });
 
+    res.json({
+      success: true,
+      tweet_id: tweet.id,
+      draft: tweetDraft,
+      time_of_day,
+      score: tweet.score,
+      intentUrl,
+      editUrl: `${baseUrl}/api/view-edit?id=${tweet.id}&token=${approveToken}`,
+      feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweet.id}&token=${approveToken}`,
+      token: approveToken
+    });
   } catch (err: any) {
+    logger.error({ err: err.message, stack: err.stack }, 'Failed to generate tweet');
     res.status(500).json({ error: err.message });
   }
 });
 
-/* ---------------- TELEGRAM ---------------- */
-
 app.post('/api/telegram/webhook', async (req, res) => {
-  const { callback_query } = req.body;
+  const { callback_query, message } = req.body;
+
+  // Basic validation (Telegram sends bot token in the URL if set up that way,
+  // but for simplicity we rely on ID/Token inside callback_data)
 
   if (callback_query) {
     const chatId = callback_query.message.chat.id;
@@ -138,14 +133,13 @@ app.post('/api/telegram/webhook', async (req, res) => {
         }
       });
 
-      await sendTelegramMessage(chatId, `Marked as Posted. Tweet ID: ${tweetId}`);
-    }
-
-    if (action === 'ct' || action === 'copy_tweet') {
+      await sendTelegramMessage(chatId, `✅ Marked as Posted!\nTweet ID: \`${tweetId}\``);
+    } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
-      await sendTelegramMessage(chatId, content);
+      await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
     }
 
+    // Answer callback to remove loading state in Telegram
     await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -156,8 +150,6 @@ app.post('/api/telegram/webhook', async (req, res) => {
   res.sendStatus(200);
 });
 
-/* ---------------- TELEGRAM HELPER ---------------- */
-
 async function sendTelegramMessage(chatId: number | string, text: string) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   if (!token) return;
@@ -167,36 +159,29 @@ async function sendTelegramMessage(chatId: number | string, text: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: chatId,
-      text,
+      text: text,
+      parse_mode: 'Markdown'
     })
   });
 }
 
-/* ---------------- EDIT ---------------- */
-
 app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
-
-  if (!verifyToken(id, token)) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
+  if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
 
   await prisma.tweet.update({
     where: { id },
     data: { edited_topic: new_topic }
   });
 
-  res.json({ success: true });
+  logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting regeneration');
+  // Trigger regeneration flow here or return success and let client requery
+  res.json({ success: true, message: "Topic updated. Regenerate draft to apply effects." });
 });
-
-/* ---------------- FEEDBACK ---------------- */
 
 app.post('/api/feedback', async (req, res) => {
   const { id, feedback, token } = req.body;
-
-  if (!verifyToken(id, token)) {
-    return res.status(403).json({ error: "Unauthorized" });
-  }
+  if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
 
   await prisma.feedback.create({
     data: {
@@ -205,94 +190,35 @@ app.post('/api/feedback', async (req, res) => {
     }
   });
 
+  logger.info({ tweet_id: id }, 'Feedback received');
   res.json({ success: true });
 });
 
-/* ---------------- RETRIES ---------------- */
-
 app.post('/api/retries/process', async (req, res) => {
-  logger.info("Processing retry queue");
+  logger.info("Processing generic retry queue (X API posting disabled)");
+  // This can be repurposed for email retries or other background tasks
   res.json({ success: true, processed: 0 });
 });
 
-async function runAgent(id: string, timeOfDay: string, topic?: string) {
-  try {
-    logger.info(`Starting job ${id}`);
-
-    const result: any = await agentGraph.invoke({
-      timeOfDay,
-      topic: topic ?? "",
-      iterationCount: 0,
-      deadline: Date.now() + 50000
-    });
-
-    // ✅ ADD THIS LINE HERE
-    logger.info({ result }, "Agent output");
-
-    // (optional but useful)
-    logger.info({ draft: result?.draft, score: result?.score }, "Parsed output");
-
-    // ✅ SAFETY GUARD
-    if (!result || !result.draft) {
-      throw new Error("Agent returned empty result");
-    }
-
-    const tweetDraft = result?.draft || "Fallback: Keep building.";
-    const finalTopic = result?.topic || "AI Generated";
-
-    const encodedTweet = encodeURIComponent(tweetDraft);
-    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
-
-    await prisma.tweet.update({
-      where: { id },
-      data: {
-        original_topic: topic || finalTopic || "AI Generated",
-        score: result.score || 0,
-        status: 'PENDING',
-        intent_url: intentUrl,
-        versions: {
-          create: {
-            content: tweetDraft,
-            version: 1,
-            critique: result.critique || ""
-          }
-        }
-      }
-    });
-
-    logger.info(`Job ${id} completed`);
-
-  } catch (err: any) {
-    logger.error({
-      message: "Job failed",
-      error: err?.message,
-      stack: err?.stack
-    });
-
-    await prisma.tweet.update({
-      where: { id },
-      data: {
-        status: 'ERROR'
-      }
-    });
-  }
-}
-
-/* ---------------- START SERVER ---------------- */
-
 const PORT = Number(process.env.PORT) || 3000;
-
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-  logger.info({ PORT }, "Server started");
+  console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
+  console.log(`📍 [URL] ${process.env.BASE_URL || 'http://localhost:3000'}`);
+
+  if (!process.env.BASE_URL) {
+    console.warn(`⚠️ [WARNING] BASE_URL is NOT set. Links will default to localhost.`);
+  } else {
+    console.log(`✅ [CONFIG] BASE_URL is set to: ${process.env.BASE_URL}`);
+  }
+
+  logger.info({ PORT, BASE_URL: process.env.BASE_URL }, "Server started with diagnostics");
 });
 
-/* ---------------- SAFETY ---------------- */
-
+// Prevent silent exit in some environments
 process.on('uncaughtException', (err) => {
-  logger.error({ err }, 'Uncaught Exception');
+  logger.error({ err: err.message, stack: err.stack }, 'Uncaught Exception');
 });
 
-process.on('unhandledRejection', (reason) => {
+process.on('unhandledRejection', (reason, promise) => {
   logger.error({ reason }, 'Unhandled Rejection');
 });
