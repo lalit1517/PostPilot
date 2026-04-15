@@ -38,34 +38,38 @@ function verifyToken(id: string, token: string) {
   }
 }
 
-app.post('/api/generate', async (req, res) => {
+// Add helper for background processing
+async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, callbackUrl?: string) {
   try {
-    const { time_of_day = 'morning', topic } = req.body || {};
-    logger.info({ time_of_day, topic }, 'Generate request received');
-
     const startAgent = Date.now();
-    // Run LangGraph Agent with a safety timeout wrapper
-    const finalState = await Promise.race([
-      agentGraph.invoke({
-        timeOfDay: time_of_day,
-        topic: topic,
-        iterationCount: 0
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Global Workflow Timeout")), 55_000))
-    ]) as any;
-    
-    logger.info({ agentDuration: `${Date.now() - startAgent}ms` }, 'Agent workflow completed');
+    logger.info({ tweetId }, 'Starting background generation...');
+
+    // Full quality run - no short-circuiting!
+    const finalState = await agentGraph.invoke({
+      timeOfDay: time_of_day,
+      topic: topic ?? "",
+      iterationCount: 0
+    }) as any;
 
     const tweetDraft = finalState.draft;
     const finalTopic = finalState.topic;
 
-    // Create Base Tweet
-    const tweet = await prisma.tweet.create({
+    if (!tweetDraft) throw new Error("Agent failed to generate draft");
+
+    // Generate Intent URL
+    const encodedTweet = encodeURIComponent(tweetDraft);
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
+    const approveToken = generateToken(tweetId);
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+
+    // Update the record with final results
+    const updatedTweet = await prisma.tweet.update({
+      where: { id: tweetId },
       data: {
         original_topic: topic || finalTopic || "AI Generated",
-        time_of_day,
         score: finalState.score || 0,
         status: 'PENDING',
+        intent_url: intentUrl,
         versions: {
           create: {
             content: tweetDraft,
@@ -76,45 +80,95 @@ app.post('/api/generate', async (req, res) => {
       }
     });
 
-    const approveToken = generateToken(tweet.id);
-    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
-
-    // Generate Intent URL
-    const encodedTweet = encodeURIComponent(tweetDraft);
-    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
-
-    // Update tweet with intent_url
-    await prisma.tweet.update({
-      where: { id: tweet.id },
-      data: { intent_url: intentUrl }
-    });
-
-    res.json({
+    const payload = {
       success: true,
-      tweet_id: tweet.id,
+      tweet_id: tweetId,
       draft: tweetDraft,
       time_of_day,
-      score: tweet.score,
+      score: updatedTweet.score,
       intentUrl,
-      editUrl: `${baseUrl}/api/view-edit?id=${tweet.id}&token=${approveToken}`,
-      feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweet.id}&token=${approveToken}`,
-      token: approveToken
-    });
-  } catch (err: any) {
-    logger.error({ err: err.message, stack: err.stack }, 'Failed to generate tweet');
-    
-    // Permanent Fix: If we hit a timeout, try to return a generic fallback so the client doesn't 500
-    if (err.message.includes('timeout') || err.message.includes('aborted')) {
-      return res.status(200).json({
-        success: false,
-        error: "Generation is taking longer than expected. Please try a specific topic.",
-        draft: "Technical insight: Focus on modular architecture for long-term scalability. Avoid tight coupling in distributed systems.",
-        retryPossible: true
-      });
+      editUrl: `${baseUrl}/api/view-edit?id=${tweetId}&token=${approveToken}`,
+      feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${approveToken}`,
+      token: approveToken,
+      duration: `${Date.now() - startAgent}ms`
+    };
+
+    logger.info({ tweetId, duration: payload.duration }, 'Background generation finished');
+
+    // If a callback URL exists (from n8n), send the results there
+    if (callbackUrl) {
+      logger.info({ callbackUrl }, 'Sending result to webhook...');
+      try {
+        await fetch(callbackUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        logger.info('Webhook delivered successfully');
+      } catch (webhookErr: any) {
+        logger.error({ err: webhookErr.message }, 'Failed to deliver webhook');
+      }
     }
-    
+  } catch (err: any) {
+    logger.error({ tweetId, err: err.message }, 'Background generation failed');
+    await prisma.tweet.update({
+      where: { id: tweetId },
+      data: { status: 'ERROR' }
+    });
+  }
+}
+
+app.post('/api/generate', async (req, res) => {
+  try {
+    const { time_of_day = 'morning', topic, callbackUrl } = req.body || {};
+    logger.info({ time_of_day, topic }, 'Generate request received (Async Mode)');
+
+    // 1. Create the database record IMMEDIATELY in 'GENERATING' state
+    const tweet = await prisma.tweet.create({
+      data: {
+        original_topic: topic || "AI Generating...",
+        time_of_day,
+        status: 'GENERATING',
+      }
+    });
+
+    // 2. Start the process in the background (DO NOT AWAIT)
+    processGenerationInBackground(tweet.id, time_of_day, topic, callbackUrl)
+      .catch(err => logger.error({ err }, 'Fatal background error'));
+
+    // 3. Respond to the client instantly
+    res.status(202).json({
+      success: true,
+      message: "Generation started in background",
+      tweet_id: tweet.id,
+      status: 'GENERATING',
+      checkStatusUrl: `${process.env.BASE_URL || 'http://localhost:3000'}/api/status?id=${tweet.id}`
+    });
+
+  } catch (err: any) {
+    logger.error({ err: err.message }, 'Failed to initiate generation');
     res.status(500).json({ error: err.message });
   }
+});
+
+// Added Status Endpoint for Polling
+app.get('/api/status', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).json({ error: "Missing ID" });
+
+  const tweet = await prisma.tweet.findUnique({
+    where: { id: String(id) },
+    include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
+  });
+
+  if (!tweet) return res.status(404).json({ error: "Job not found" });
+
+  res.json({
+    id: tweet.id,
+    status: tweet.status,
+    draft: tweet.versions[0]?.content,
+    score: tweet.score
+  });
 });
 
 app.post('/api/telegram/webhook', async (req, res) => {
