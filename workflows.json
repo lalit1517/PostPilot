@@ -68,10 +68,10 @@
     {
       "parameters": {
         "chatId": "861708547",
-        "text": "=🚀 **New X Post Draft**\n---\nDraft: *{{ $json.body.draft }}*\nTime: {{ $json.body.time_of_day || 'Not set' }}\nScore: {{ $json.body.score || 0 }}/10\n---",
+        "text": "=🚀 <b>New X Post Draft</b>\n---\n<b>Draft:</b>\n<pre>{{ $json.body.draft }}</pre>\n\n<b>Time:</b> {{ $json.body.time_of_day || 'Not set' }}\n<b>Score:</b> {{ $json.body.score || 0 }}/10\n---",
         "additionalFields": {
-          "parse_mode": "Markdown",
-          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.body.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.body.editUrl || 'https://google.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.body.feedbackUrl || 'https://google.com') }],\n    [\n      { \"text\": \"✅ I\\u0027ve Posted This\", \"callback_data\": \"pc:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 16)) },\n      { \"text\": \"📋 Copy Tweet\", \"callback_data\": \"ct:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 16)) }\n    ]\n  ]\n}) }}"
+          "parse_mode": "HTML",
+          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.body.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.body.editUrl || 'https://twitter.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.body.feedbackUrl || 'https://twitter.com') }],\n    [\n      { \"text\": \"✅ Posted\", \"callback_data\": \"pc:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 8)) },\n      { \"text\": \"📋 Copy\", \"callback_data\": \"ct:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 8)) }\n    ]\n  ]\n}) }}"
         }
       },
       "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",

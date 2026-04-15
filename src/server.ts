@@ -31,7 +31,7 @@ function verifyToken(id: string, token: string) {
   try {
     if (!token) return false;
     const expected = generateToken(id).substring(0, token.length);
-    if (token.length < 16 || expected.length !== token.length) return false;
+    if (token.length < 8 || expected.length !== token.length) return false;
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token));
   } catch (err) {
     return false;
