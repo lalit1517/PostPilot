@@ -219,17 +219,23 @@ async function runAgent(id: string, timeOfDay: string, topic?: string) {
   try {
     logger.info(`Starting job ${id}`);
 
-    const result: any = await Promise.race([
-      agentGraph.invoke({
-        timeOfDay,
-        topic: topic ?? "",
-        iterationCount: 0,
-        deadline: Date.now() + 50000
-      }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Worker timeout")), 55000)
-      )
-    ]);
+    const result: any = await agentGraph.invoke({
+      timeOfDay,
+      topic: topic ?? "",
+      iterationCount: 0,
+      deadline: Date.now() + 50000
+    });
+
+    // ✅ ADD THIS LINE HERE
+    logger.info({ result }, "Agent output");
+
+    // (optional but useful)
+    logger.info({ draft: result?.draft, score: result?.score }, "Parsed output");
+
+    // ✅ SAFETY GUARD
+    if (!result || !result.draft) {
+      throw new Error("Agent returned empty result");
+    }
 
     const tweetDraft = result?.draft || "Fallback: Keep building.";
     const finalTopic = result?.topic || "AI Generated";
@@ -256,8 +262,12 @@ async function runAgent(id: string, timeOfDay: string, topic?: string) {
 
     logger.info(`Job ${id} completed`);
 
-  } catch (err) {
-    logger.error(`Job ${id} failed`);
+  } catch (err: any) {
+    logger.error({
+      message: "Job failed",
+      error: err?.message,
+      stack: err?.stack
+    });
 
     await prisma.tweet.update({
       where: { id },
