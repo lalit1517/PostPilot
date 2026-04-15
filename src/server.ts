@@ -27,6 +27,8 @@ function generateToken(id: string) {
   return crypto.createHmac('sha256', HMAC_SECRET).update(id).digest('hex');
 }
 
+const CALL_TIMEOUT = 300_000; // Increased to 5 minutes for stable generation
+
 function verifyToken(id: string, token: string) {
   try {
     if (!token) return false;
@@ -93,7 +95,8 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
       duration: `${Date.now() - startAgent}ms`
     };
 
-    logger.info({ tweetId, duration: payload.duration }, 'Background generation finished');
+    logger.info({ tweetId, draftLen: payload.draft.length, intentUrl: payload.intentUrl }, 'Background generation finished. Prepared payload.');
+    console.log('[DIAGNOSTIC] Final Payload:', JSON.stringify(payload, null, 2));
 
     // If a callback URL exists (from n8n), send the results there
     if (callbackUrl) {
