@@ -21,17 +21,17 @@ const AgentState = Annotation.Root({
 // ✅ FIX 2: Increased timeout signal to 90s per call
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
-  temperature: 1.1, // Reduced slightly for faster, more stable generation
+  temperature: 0.7, // Lowered significantly: limits hallucination and trailing commas
   maxOutputTokens: 500,
   topP: 0.9,
-  maxRetries: 2,
+  maxRetries: 3, // Increased retry attempts for API latency
 };
 
 const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety buffer
 
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-3.1-flash-lite-preview", // March 2026 bleeding edge - Ultra fast and multimodal
+  model: "gemini-2.5-flash", // Stable, reliable, and handles tight constraints without trimming
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
@@ -39,7 +39,7 @@ const llm = new ChatGoogleGenerativeAI({
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-2.5-flash",
+    model: "gemini-3.1-flash-lite-preview",
   }),
 ]);
 
@@ -122,15 +122,19 @@ Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
       draft = parts.slice(1).join('|').trim();
     }
 
+    if (draft && !draft.match(/[.!?]$/)) {
+      draft += ".";
+    }
+
     logger.info({ topic, draftLength: draft.length, duration: `${Date.now() - start}ms` }, "Parsed AI Generation");
     return { topic, draft, iterationCount: 1 };
   } catch (err: any) {
     logger.error({ err: err.message }, "Content Generator failed or timed out. Using fallback.");
     // Fallback if the main call and fallbacks all fail
-    return { 
+    return {
       topic: state.topic || "General Update",
       draft: "Consistently building and shipping every day. Progress is the only metric that matters.",
-      iterationCount: 1 
+      iterationCount: 1
     };
   }
 }
@@ -157,7 +161,9 @@ async function autoRefiner(state: typeof AgentState.State) {
 
   try {
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-    return { draft: res.content as string, iterationCount: 2 };
+    let draft = (res.content as string).trim();
+    if (draft && !draft.match(/[.!?]$/)) draft += ".";
+    return { draft, iterationCount: 2 };
   } catch (err) {
     logger.warn("Auto Refiner timed out. Using original draft.");
     return { draft: state.draft, iterationCount: 2 }; // Keep original draft on failure
