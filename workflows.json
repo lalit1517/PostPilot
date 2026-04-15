@@ -1,5 +1,5 @@
 {
-  "name": "X Agent Workflows",
+  "name": "X Agent Workflows (Async)",
   "nodes": [
     {
       "parameters": {
@@ -32,6 +32,10 @@
             {
               "name": "time_of_day",
               "value": "={{ $now.hour < 12 ? 'morning' : ($now.hour < 18 ? 'afternoon' : 'night') }}"
+            },
+            {
+              "name": "callbackUrl",
+              "value": "https://YOUR_N8N_INSTANCE.app/webhook/tweet-ready"
             }
           ]
         },
@@ -48,11 +52,25 @@
     },
     {
       "parameters": {
+        "path": "tweet-ready",
+        "options": {}
+      },
+      "id": "c0ffee-webhook-id",
+      "name": "Webhook (Tweet Ready)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        200,
+        500
+      ]
+    },
+    {
+      "parameters": {
         "chatId": "861708547",
-        "text": "=🚀 **New X Post Draft**\n---\nDraft: *{{ $json.draft }}*\nTime: {{ $json.time_of_day || 'Not set' }}\nScore: {{ $json.score || 0 }}/10\n---",
+        "text": "=🚀 **New X Post Draft**\n---\nDraft: *{{ $json.body.draft }}*\nTime: {{ $json.body.time_of_day || 'Not set' }}\nScore: {{ $json.body.score || 0 }}/10\n---",
         "additionalFields": {
           "parse_mode": "Markdown",
-          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.editUrl || 'https://google.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.feedbackUrl || 'https://google.com') }],\n    [\n      { \"text\": \"✅ I've Posted This\", \"callback_data\": \"pc:\" + ($json.tweet_id || '') + \":\" + (($json.token || '').substring(0, 16)) },\n      { \"text\": \"📋 Copy Tweet\", \"callback_data\": \"ct:\" + ($json.tweet_id || '') + \":\" + (($json.token || '').substring(0, 16)) }\n    ]\n  ]\n}) }}"
+          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.body.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.body.editUrl || 'https://google.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.body.feedbackUrl || 'https://google.com') }],\n    [\n      { \"text\": \"✅ I\\u0027ve Posted This\", \"callback_data\": \"pc:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 16)) },\n      { \"text\": \"📋 Copy Tweet\", \"callback_data\": \"ct:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 16)) }\n    ]\n  ]\n}) }}"
         }
       },
       "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",
@@ -60,8 +78,8 @@
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1,
       "position": [
-        640,
-        200
+        420,
+        500
       ]
     },
     {
@@ -81,7 +99,7 @@
       "typeVersion": 1,
       "position": [
         200,
-        420
+        750
       ]
     },
     {
@@ -96,7 +114,7 @@
       "typeVersion": 4.1,
       "position": [
         420,
-        420
+        750
       ]
     }
   ],
@@ -113,22 +131,22 @@
         ]
       ]
     },
-    "Generate Tweet": {
+    "Cron (Retry Queue)": {
       "main": [
         [
           {
-            "node": "Telegram (Notification)",
+            "node": "Process Retries",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Cron (Retry Queue)": {
+    "Webhook (Tweet Ready)": {
       "main": [
         [
           {
-            "node": "Process Retries",
+            "node": "Telegram (Notification)",
             "type": "main",
             "index": 0
           }

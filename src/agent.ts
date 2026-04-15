@@ -34,7 +34,7 @@ const llm = new ChatGoogleGenerativeAI({
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-1.5-flash", 
+    model: "gemini-1.5-flash",
   }),
 ]);
 
