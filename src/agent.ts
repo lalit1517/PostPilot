@@ -21,20 +21,21 @@ const AgentState = Annotation.Root({
 // ✅ FIX 2: Increased timeout signal to 90s per call
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
-  temperature: 1.3,
-  maxOutputTokens: 300,
-  topP: 0.95,
+  temperature: 1.1, // Reduced slightly for faster, more stable generation
+  maxOutputTokens: 500,
+  topP: 0.9,
+  maxRetries: 2,
 };
 
-const CALL_TIMEOUT = 60_000; // Increased to 60s since we are now in the background
+const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety buffer
 
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-2.0-flash", // Use stable model for better reliability
+  model: "gemini-1.5-flash", // 1.5 Flash is currently more stable for high-volume background tasks
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-1.5-flash",
+    model: "gemini-2.0-flash",
   }),
 ]);
 
