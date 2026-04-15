@@ -29,6 +29,12 @@ function generateToken(id: string) {
 
 const CALL_TIMEOUT = 300_000; // Increased to 5 minutes for stable generation
 
+function escapeHTML(str: string) {
+  return str.replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+}
+
 function verifyToken(id: string, token: string) {
   try {
     if (!token) return false;
@@ -86,12 +92,14 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
       success: true,
       tweet_id: tweetId,
       draft: tweetDraft,
+      topic: updatedTweet.original_topic,
       time_of_day,
       score: updatedTweet.score,
       intentUrl,
       editUrl: `${baseUrl}/api/view-edit?id=${tweetId}&token=${approveToken}`,
       feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${approveToken}`,
       token: approveToken,
+      htmlDraft: escapeHTML(tweetDraft),
       duration: `${Date.now() - startAgent}ms`
     };
 
