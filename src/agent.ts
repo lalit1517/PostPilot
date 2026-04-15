@@ -17,50 +17,57 @@ const AgentState = Annotation.Root({
   iterationCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
 });
 
-// Config for all models 
+// ✅ FIX 1: Temperature lowered to 1.3 (safe, still creative)
+// ✅ FIX 2: Increased timeout signal to 90s per call
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
-  temperature: 1.8,
+  temperature: 1.3,
   maxOutputTokens: 300,
   topP: 0.95,
 };
 
-// Initialize the primary model with fallbacks
+const CALL_TIMEOUT = 90_000; // 90s per LLM call
+
+// ✅ FIX 3: All valid, active model IDs in fallback chain
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-2.5-flash", 
+  model: "gemini-3.1-flash-lite-preview", // Primary: fastest, most RPD
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-2-flash",
+    model: "gemini-3-flash-preview",       // Fallback 1: smarter
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-1.5-flash",
+    model: "gemini-2.5-flash",             // Fallback 2: stable, no -preview risk
   }),
 ]);
 
 async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
-  const topTweetsQuery = await prisma.engagement.findMany({
-    orderBy: { likes: 'desc' },
-    take: 5,
-    include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
-  });
-  const context = topTweetsQuery.map(t => t.tweet.versions[0]?.content).filter(Boolean) as string[];
 
-  const recentFeedbackQuery = await prisma.feedback.findMany({
-    orderBy: { created_at: 'desc' },
-    take: 5
-  });
+  const [topTweetsQuery, recentFeedbackQuery, recentTopicsQuery] = await Promise.all([
+    prisma.engagement.findMany({
+      orderBy: { likes: 'desc' },
+      take: 5,
+      include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
+    }),
+    prisma.feedback.findMany({
+      orderBy: { created_at: 'desc' },
+      take: 5
+    }),
+    prisma.tweet.findMany({
+      orderBy: { created_at: 'desc' },
+      take: 10,
+      select: { original_topic: true, edited_topic: true }
+    })
+  ]); // ✅ FIX 4: Run all DB queries in parallel, not sequentially
+
+  const context = topTweetsQuery
+    .map(t => t.tweet.versions[0]?.content)
+    .filter(Boolean) as string[];
   const recentFeedback = recentFeedbackQuery.map(f => f.feedback_text);
-
-  const recentTopicsQuery = await prisma.tweet.findMany({
-    orderBy: { created_at: 'desc' },
-    take: 10,
-    select: { original_topic: true, edited_topic: true }
-  });
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
 
   logger.info({ duration: `${Date.now() - start}ms` }, "Finished contextLoader");
@@ -89,7 +96,7 @@ STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.`;
 async function contentGenerator(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info({ topic: state.topic }, "Running contentGenerator (LLM Call 1)...");
-  
+
   const prompt = `${state.personaParameters}
 ${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}
 Target: Generate both a Topic and a Draft.
@@ -98,9 +105,9 @@ Example: AI Ethics|Why we need to talk about data bias...
 
 Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
 
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
   const content = (res.content as string).trim();
-  
+
   let topic = "AI Generated";
   let draft = content;
 
@@ -117,24 +124,30 @@ Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be p
 async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
   const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
-  
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
+
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
   const parts = (res.content as string).split('|');
   const score = parseFloat(parts[0] || '0') || 0;
   const critique = parts[1] || '';
-  
+
   return { score, critique };
 }
 
 async function autoRefiner(state: typeof AgentState.State) {
-  // Only runs if score is low. Max calls for init gen = 3.
-  if (state.score >= 8) return { draft: state.draft };
-
   logger.info({ score: state.score }, "Running autoRefiner (LLM Call 3)");
   const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}`;
-  
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(60000) });
+
+  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
   return { draft: res.content as string, iterationCount: 2 };
+}
+
+// ✅ FIX 5: Conditional edge — skip autoRefiner if score >= 8, saves one full LLM call
+function shouldRefine(state: typeof AgentState.State): "autoRefiner" | typeof END {
+  if (state.score >= 8) {
+    logger.info({ score: state.score }, "Score >= 8, skipping autoRefiner");
+    return END;
+  }
+  return "autoRefiner";
 }
 
 const workflow = new StateGraph(AgentState)
@@ -143,12 +156,12 @@ const workflow = new StateGraph(AgentState)
   .addNode("contentGenerator", contentGenerator)
   .addNode("qualityScorer", qualityScorer)
   .addNode("autoRefiner", autoRefiner)
-  
+
   .addEdge(START, "contextLoader")
   .addEdge("contextLoader", "personaAdapter")
   .addEdge("personaAdapter", "contentGenerator")
   .addEdge("contentGenerator", "qualityScorer")
-  .addEdge("qualityScorer", "autoRefiner")
+  .addConditionalEdges("qualityScorer", shouldRefine) // ✅ Conditional skip
   .addEdge("autoRefiner", END);
 
 export const agentGraph = workflow.compile();
