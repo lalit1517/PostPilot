@@ -106,7 +106,7 @@ Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be p
 
   if (content.includes('|')) {
     const parts = content.split('|');
-    topic = parts[0].trim();
+    topic = (parts[0] ?? "").trim();
     draft = parts.slice(1).join('|').trim();
   }
 

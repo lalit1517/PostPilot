@@ -3,7 +3,6 @@ import express from 'express';
 import crypto from 'crypto';
 import { prisma } from './db.js';
 import { logger } from './logger.js';
-import { postToX } from './x-api.js';
 import { agentGraph } from './agent.js';
 
 const app = express();
@@ -73,13 +72,26 @@ app.post('/api/generate', async (req, res) => {
     });
 
     const approveToken = generateToken(tweet.id);
-    const approveUrl = `${process.env.BASE_URL || 'http://localhost:3000'}/api/confirm-approve?id=${tweet.id}&token=${approveToken}`;
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+    
+    // Generate Intent URL
+    const encodedTweet = encodeURIComponent(tweetDraft);
+    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
+    
+    // Update tweet with intent_url
+    await prisma.tweet.update({
+      where: { id: tweet.id },
+      data: { intent_url: intentUrl }
+    });
 
     res.json({
       success: true,
       tweet_id: tweet.id,
       draft: tweetDraft,
-      approveUrl,
+      intentUrl,
+      editUrl: `${baseUrl}/api/view-edit?id=${tweet.id}&token=${approveToken}`,
+      feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweet.id}&token=${approveToken}`,
+      token: approveToken
     });
   } catch (err: any) {
     logger.error({ err: err.message, stack: err.stack }, 'Failed to generate tweet');
@@ -87,78 +99,68 @@ app.post('/api/generate', async (req, res) => {
   }
 });
 
-app.get('/api/confirm-approve', (req, res) => {
-  const { id, token } = req.query as { id: string; token: string };
-  if (!id || !token || !verifyToken(id, token)) {
-    return res.status(403).send('Invalid or expired link.');
+app.post('/api/telegram/webhook', async (req, res) => {
+  const { callback_query, message } = req.body;
+  
+  // Basic validation (Telegram sends bot token in the URL if set up that way,
+  // but for simplicity we rely on ID/Token inside callback_data)
+  
+  if (callback_query) {
+    const chatId = callback_query.message.chat.id;
+    const [action, tweetId, token] = (callback_query.data || "").split(':');
+
+    if (!tweetId || !token || !verifyToken(tweetId, token)) {
+      return res.status(403).json({ error: "Invalid token" });
+    }
+
+    const tweet = await prisma.tweet.findUnique({ 
+      where: { id: tweetId },
+      include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
+    });
+
+    if (!tweet) return res.status(404).json({ error: "Tweet not found" });
+
+    if (action === 'posted_confirmed') {
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { 
+          status: 'POSTED_CONFIRMED',
+          posted: true,
+          posted_at: new Date()
+        }
+      });
+      
+      await sendTelegramMessage(chatId, `✅ Marked as Posted!\nTweet ID: \`${tweetId}\``);
+    } else if (action === 'copy_tweet') {
+      const content = tweet.versions[0]?.content || "No content found";
+      await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
+    }
+
+    // Answer callback to remove loading state in Telegram
+    await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callback_query_id: callback_query.id })
+    });
   }
 
-  res.send(`
-    <html>
-    <head>
-      <title>Confirm X Post</title>
-      <style>body { font-family: sans-serif; padding: 40px; text-align: center; background: #fdfdfd; }</style>
-    </head>
-    <body>
-      <h2>Are you sure you want to approve this post?</h2>
-      <p>This action will immediately post the drafted content to X.</p>
-      <form action="/api/approve" method="POST">
-        <input type="hidden" name="id" value="${id}" />
-        <input type="hidden" name="token" value="${token}" />
-        <button type="submit" style="padding: 15px 30px; font-size: 16px; background: #1DA1F2; color: white; border: none; border-radius: 8px; cursor: pointer;">
-          Yes, Post to X
-        </button>
-      </form>
-    </body>
-    </html>
-  `);
+  res.sendStatus(200);
 });
 
-app.post('/api/approve', async (req, res) => {
-  const { id, token } = req.body;
-  if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
+async function sendTelegramMessage(chatId: number | string, text: string) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) return;
 
-  const tweet = await prisma.tweet.findUnique({ where: { id } });
-  if (!tweet) return res.status(404).json({ error: "Tweet not found" });
-
-  // Idempotency check
-  if (tweet.posted || tweet.status === 'POSTED') {
-    logger.warn({ tweet_id: id }, 'Duplicate post attempt prevented');
-    return res.json({ message: "Tweet already posted." });
-  }
-
-  const latestVersion = await prisma.tweetVersion.findFirst({
-    where: { tweet_id: id },
-    orderBy: { version: 'desc' }
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text: text,
+      parse_mode: 'Markdown'
+    })
   });
-
-  if (!latestVersion) return res.status(500).json({ error: "Draft content missing" });
-
-  try {
-    const xId = await postToX(latestVersion.content);
-    await prisma.tweet.update({
-      where: { id },
-      data: { posted: true, x_tweet_id: xId, status: 'POSTED' }
-    });
-    res.json({ success: true, url: `https://x.com/user/status/${xId}` });
-  } catch (error: any) {
-    logger.error({ tweet_id: id, err: error.message }, 'Failed to post directly, moving to retry queue');
-
-    await prisma.retryQueue.create({
-      data: {
-        task_type: 'POST_TO_X',
-        payload: { tweet_id: id, content: latestVersion.content }
-      }
-    });
-
-    await prisma.tweet.update({
-      where: { id },
-      data: { status: 'ERROR' }
-    });
-
-    res.status(500).json({ error: "X API failure. Queued for background retry." });
-  }
-});
+}
 
 app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
@@ -190,39 +192,9 @@ app.post('/api/feedback', async (req, res) => {
 });
 
 app.post('/api/retries/process', async (req, res) => {
-  logger.info("Processing retry queue");
-  const pendingTasks = await prisma.retryQueue.findMany({
-    where: { status: 'PENDING', attempts: { lt: 3 } },
-    take: 10
-  });
-
-  for (const task of pendingTasks) {
-    if (task.task_type === 'POST_TO_X') {
-      const payload: any = task.payload;
-      try {
-        const xId = await postToX(payload.content);
-        await prisma.retryQueue.update({
-          where: { id: task.id },
-          data: { status: 'COMPLETED' }
-        });
-        await prisma.tweet.update({
-          where: { id: payload.tweet_id },
-          data: { posted: true, x_tweet_id: xId, status: 'POSTED' }
-        });
-      } catch (err: any) {
-        await prisma.retryQueue.update({
-          where: { id: task.id },
-          data: {
-            attempts: task.attempts + 1,
-            last_error: err.message,
-            status: task.attempts + 1 >= task.max_retries ? 'FAILED' : 'PENDING'
-          }
-        });
-      }
-    }
-  }
-
-  res.json({ success: true, processed: pendingTasks.length });
+  logger.info("Processing generic retry queue (X API posting disabled)");
+  // This can be repurposed for email retries or other background tasks
+  res.json({ success: true, processed: 0 });
 });
 
 const PORT = Number(process.env.PORT) || 3000;
