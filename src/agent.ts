@@ -4,6 +4,8 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 
+/* ---------------- STATE ---------------- */
+
 const AgentState = Annotation.Root({
   topic: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   timeOfDay: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "morning" }),
@@ -15,35 +17,48 @@ const AgentState = Annotation.Root({
   score: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
   critique: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   iterationCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
+  deadline: Annotation<number>({
+    reducer: (x, y) => y ?? x,
+    default: () => 0
+  }),
 });
 
-// ✅ FIX 1: Temperature lowered to 1.3 (safe, still creative)
-// ✅ FIX 2: Increased timeout signal to 90s per call
+/* ---------------- CONFIG ---------------- */
+
+// 🔥 TOTAL TIME BUDGET (IMPORTANT)
+const TOTAL_TIMEOUT = 50_000;
+
+// LLM config
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
   temperature: 1.1,
   maxOutputTokens: 250,
 };
 
-const CALL_TIMEOUT = 25_000; // 90s per LLM call
-
-// ✅ FIX 3: All valid, active model IDs in fallback chain
+// ✅ Fallback chain (kept as you wanted)
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-3.1-flash-lite-preview", // Primary: fastest, most RPD
+  model: "gemini-3.1-flash-lite-preview",
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-3-flash-preview",       // Fallback 1: smarter
+    model: "gemini-3-flash-preview",
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-2.5-flash",             // Fallback 2: stable, no -preview risk
+    model: "gemini-2.5-flash",
   }),
 ]);
 
+/* ---------------- TIME HELPER ---------------- */
+
+function getRemainingTime(state: typeof AgentState.State) {
+  return Math.max(0, state.deadline - Date.now());
+}
+
+/* ---------------- NODES ---------------- */
+
 async function contextLoader(state: typeof AgentState.State) {
-  const start = Date.now();
   logger.info("Running contextLoader...");
 
   const [topTweetsQuery, recentFeedbackQuery, recentTopicsQuery] = await Promise.all([
@@ -61,93 +76,127 @@ async function contextLoader(state: typeof AgentState.State) {
       take: 10,
       select: { original_topic: true, edited_topic: true }
     })
-  ]); // ✅ FIX 4: Run all DB queries in parallel, not sequentially
+  ]);
 
-  const context = topTweetsQuery
-    .map(t => t.tweet.versions[0]?.content)
-    .filter(Boolean) as string[];
-  const recentFeedback = recentFeedbackQuery.map(f => f.feedback_text);
-  const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
-
-  logger.info({ duration: `${Date.now() - start}ms` }, "Finished contextLoader");
-  return { context, recentFeedback, recentTopics, iterationCount: state.iterationCount || 0 };
+  return {
+    context: topTweetsQuery.map(t => t.tweet.versions[0]?.content).filter(Boolean),
+    recentFeedback: recentFeedbackQuery.map(f => f.feedback_text),
+    recentTopics: recentTopicsQuery.map(t => t.edited_topic || t.original_topic),
+  };
 }
 
 async function personaAdapter(state: typeof AgentState.State) {
-  logger.info("Running personaAdapter");
   let toneInstruction = "Be insightful.";
-  if (state.timeOfDay === 'morning') toneInstruction = "Create content that delivers a deep, valuable insight. Be intellectual but concise.";
-  if (state.timeOfDay === 'afternoon') toneInstruction = "Make the content bold, punchy, or a strong hot take to spark conversation.";
-  if (state.timeOfDay === 'night') toneInstruction = "Adopt a personal, reflective, or storytelling tone suitable for winding down the day.";
+  if (state.timeOfDay === 'morning')
+    toneInstruction = "Deep, valuable insight. Intellectual but concise.";
+  if (state.timeOfDay === 'afternoon')
+    toneInstruction = "Bold, punchy, hot take.";
+  if (state.timeOfDay === 'night')
+    toneInstruction = "Personal, reflective storytelling.";
 
-  const personaParameters = `You are a builder crafting content for X.
+  return {
+    personaParameters: `You are a builder crafting content for X.
 Tone: ${toneInstruction}
-AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.
-Apply this recent feedback rigorously: ${state.recentFeedback.join('; ')}
+Avoid topics: ${state.recentTopics.join(', ')}
+Apply feedback: ${state.recentFeedback.join('; ')}
 
-Do not use typical AI markers (emojis like 🚀, words like "delve").
-Output MUST be plain text. No markdown, no bolding (**), no hashtags.
-STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.`;
-
-  return { personaParameters };
+Rules:
+- Under 280 characters
+- No emojis
+- No hashtags
+- Plain text only`
+  };
 }
 
+/* ---------------- LLM STEPS (TIME-SAFE) ---------------- */
+
 async function contentGenerator(state: typeof AgentState.State) {
-  const start = Date.now();
-  logger.info({ topic: state.topic }, "Running contentGenerator (LLM Call 1)...");
+  const remaining = getRemainingTime(state);
 
-  const prompt = `${state.personaParameters}
-${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}
-Target: Generate both a Topic and a Draft.
-Output Format: TOPIC|DRAFT
-Example: AI Ethics|Why we need to talk about data bias...
-
-Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
-
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-  const content = (res.content as string).trim();
-
-  let topic = "AI Generated";
-  let draft = content;
-
-  if (content.includes('|')) {
-    const parts = content.split('|');
-    topic = (parts[0] ?? "").trim();
-    draft = parts.slice(1).join('|').trim();
+  if (remaining < 5000) {
+    return {
+      topic: "Fallback",
+      draft: "Consistency compounds. Show up daily.",
+      iterationCount: 1
+    };
   }
 
-  logger.info({ topic, draftLength: draft.length }, "Parsed AI Generation");
-  return { topic, draft, iterationCount: 1 };
+  try {
+    const res = await llm.invoke(
+      `${state.personaParameters}\nGenerate: TOPIC|TWEET`,
+      { signal: AbortSignal.timeout(Math.min(remaining, 20000)) }
+    );
+
+    const [topic, draft] = (res.content as string).split('|');
+
+    return {
+      topic: topic || "AI",
+      draft: draft || res.content,
+      iterationCount: 1
+    };
+
+  } catch {
+    return {
+      topic: "Fallback",
+      draft: "Most people wait. Builders start.",
+      iterationCount: 1
+    };
+  }
 }
 
 async function qualityScorer(state: typeof AgentState.State) {
-  logger.info("Running qualityScorer (LLM Call 2)");
-  const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
+  const remaining = getRemainingTime(state);
 
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-  const parts = (res.content as string).split('|');
-  const score = parseFloat(parts[0] || '0') || 0;
-  const critique = parts[1] || '';
+  if (remaining < 5000) {
+    return { score: 6, critique: "Skipped due to time" };
+  }
 
-  return { score, critique };
+  try {
+    const res = await llm.invoke(
+      `Score this tweet:\n${state.draft}\nReturn: SCORE|CRITIQUE`,
+      { signal: AbortSignal.timeout(Math.min(remaining, 15000)) }
+    );
+
+    const [score, critique] = (res.content as string).split('|');
+
+    return {
+      score: Number(score) || 6,
+      critique: critique || ""
+    };
+
+  } catch {
+    return { score: 6, critique: "Fallback scoring" };
+  }
 }
 
 async function autoRefiner(state: typeof AgentState.State) {
-  logger.info({ score: state.score }, "Running autoRefiner (LLM Call 3)");
-  const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}`;
+  const remaining = getRemainingTime(state);
 
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-  return { draft: res.content as string, iterationCount: 2 };
+  if (remaining < 7000) {
+    return { draft: state.draft };
+  }
+
+  try {
+    const res = await llm.invoke(
+      `Improve this tweet:\n${state.draft}`,
+      { signal: AbortSignal.timeout(Math.min(remaining, 15000)) }
+    );
+
+    return { draft: res.content as string };
+
+  } catch {
+    return { draft: state.draft };
+  }
 }
 
-// ✅ FIX 5: Conditional edge — skip autoRefiner if score >= 8, saves one full LLM call
+/* ---------------- FLOW CONTROL ---------------- */
+
 function shouldRefine(state: typeof AgentState.State): "autoRefiner" | typeof END {
-  if (state.score >= 8) {
-    logger.info({ score: state.score }, "Score >= 8, skipping autoRefiner");
-    return END;
-  }
+  if (state.score >= 8) return END;
   return "autoRefiner";
 }
+
+/* ---------------- WORKFLOW ---------------- */
 
 const workflow = new StateGraph(AgentState)
   .addNode("contextLoader", contextLoader)
@@ -160,7 +209,13 @@ const workflow = new StateGraph(AgentState)
   .addEdge("contextLoader", "personaAdapter")
   .addEdge("personaAdapter", "contentGenerator")
   .addEdge("contentGenerator", "qualityScorer")
-  .addConditionalEdges("qualityScorer", shouldRefine) // ✅ Conditional skip
+  .addConditionalEdges("qualityScorer", shouldRefine)
   .addEdge("autoRefiner", END);
 
 export const agentGraph = workflow.compile();
+
+/* ---------------- HELPER EXPORT ---------------- */
+
+export function getAgentDeadline() {
+  return Date.now() + TOTAL_TIMEOUT;
+}
