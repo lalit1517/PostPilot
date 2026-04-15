@@ -29,8 +29,9 @@ function generateToken(id: string) {
 
 function verifyToken(id: string, token: string) {
   try {
-    const expected = generateToken(id);
-    if (!token || expected.length !== token.length) return false;
+    if (!token) return false;
+    const expected = generateToken(id).substring(0, token.length);
+    if (token.length < 16 || expected.length !== token.length) return false;
     return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token));
   } catch (err) {
     return false;
@@ -122,18 +123,18 @@ app.post('/api/telegram/webhook', async (req, res) => {
 
     if (!tweet) return res.status(404).json({ error: "Tweet not found" });
 
-    if (action === 'posted_confirmed') {
+    if (action === 'pc' || action === 'posted_confirmed') {
       await prisma.tweet.update({
         where: { id: tweetId },
-        data: { 
+        data: {
           status: 'POSTED_CONFIRMED',
           posted: true,
           posted_at: new Date()
         }
       });
-      
+
       await sendTelegramMessage(chatId, `✅ Marked as Posted!\nTweet ID: \`${tweetId}\``);
-    } else if (action === 'copy_tweet') {
+    } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
       await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
     }
