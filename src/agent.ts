@@ -21,12 +21,11 @@ const AgentState = Annotation.Root({
 // ✅ FIX 2: Increased timeout signal to 90s per call
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
-  temperature: 1.3,
-  maxOutputTokens: 300,
-  topP: 0.95,
+  temperature: 1.1,
+  maxOutputTokens: 250,
 };
 
-const CALL_TIMEOUT = 90_000; // 90s per LLM call
+const CALL_TIMEOUT = 25_000; // 90s per LLM call
 
 // ✅ FIX 3: All valid, active model IDs in fallback chain
 const llm = new ChatGoogleGenerativeAI({
