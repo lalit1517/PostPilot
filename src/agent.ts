@@ -31,11 +31,15 @@ const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety bu
 
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-2.0-flash", // Restoring 2.0 as primary since it was recognized
+  model: "gemini-3.1-flash-lite-preview", // March 2026 bleeding edge - Ultra fast and multimodal
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-1.5-flash-latest", // Use 'latest' tag for better v1beta compatibility
+    model: "gemini-3-flash-preview",
+  }),
+  new ChatGoogleGenerativeAI({
+    ...baseConfig,
+    model: "gemini-2.5-flash",
   }),
 ]);
 
