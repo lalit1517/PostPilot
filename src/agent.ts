@@ -26,7 +26,7 @@ const baseConfig = {
   topP: 0.95,
 };
 
-const CALL_TIMEOUT = 40_000; // Reduced to 40s to ensure total graph stays under 60s Railway limit
+const CALL_TIMEOUT = 60_000; // Increased to 60s since we are now in the background
 
 const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
@@ -100,20 +100,30 @@ Example: AI Ethics|Why we need to talk about data bias...
 
 Constraints: Plain text only, under 280 characters, no markdown, no emojis. Be punchy and short.`;
 
-  const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-  const content = (res.content as string).trim();
+  try {
+    const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
+    const content = (res.content as string).trim();
 
-  let topic = "AI Generated";
-  let draft = content;
+    let topic = state.topic || "AI Generated";
+    let draft = content;
 
-  if (content.includes('|')) {
-    const parts = content.split('|');
-    topic = (parts[0] ?? "").trim();
-    draft = parts.slice(1).join('|').trim();
+    if (content.includes('|')) {
+      const parts = content.split('|');
+      topic = (parts[0] ?? "").trim() || topic;
+      draft = parts.slice(1).join('|').trim();
+    }
+
+    logger.info({ topic, draftLength: draft.length, duration: `${Date.now() - start}ms` }, "Parsed AI Generation");
+    return { topic, draft, iterationCount: 1 };
+  } catch (err: any) {
+    logger.error({ err: err.message }, "Content Generator failed or timed out. Using fallback.");
+    // Fallback if the main call and fallbacks all fail
+    return { 
+      topic: state.topic || "General Update",
+      draft: "Consistently building and shipping every day. Progress is the only metric that matters.",
+      iterationCount: 1 
+    };
   }
-
-  logger.info({ topic, draftLength: draft.length }, "Parsed AI Generation");
-  return { topic, draft, iterationCount: 1 };
 }
 
 async function qualityScorer(state: typeof AgentState.State) {
