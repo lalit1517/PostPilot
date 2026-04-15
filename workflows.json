@@ -24,7 +24,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://heavy-planets-turn.loca.lt/api/generate",
+        "url": "https://postpilot-production-c051.up.railway.app/api/generate",
         "sendHeaders": false,
         "sendBody": true,
         "bodyParameters": {
@@ -48,16 +48,17 @@
     },
     {
       "parameters": {
-        "fromEmail": "agent@myxagent.com",
-        "toEmail": "admin@myxagent.com",
-        "subject": "Waiting for Approval: New X Post Generation",
-        "html": "=<p>New Draft Generated via LangGraph:</p><blockquote>{{ $json.draft }}</blockquote><p><a href=\"{{ $json.approveUrl }}\">Review and Approve</a></p>",
-        "options": {}
+        "chatId": "861708547",
+        "text": "=🚀 **New X Post Draft**\n---\nDraft: *{{ $json.draft }}*\nTime: {{ $json.time_of_day }}\nScore: {{ $json.score }}/10\n---",
+        "additionalFields": {
+          "parse_mode": "Markdown",
+          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": $json.intentUrl }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": $json.editUrl }],\n    [{ \"text\": \"💬 Feedback\", \"url\": $json.feedbackUrl }],\n    [\n      { \"text\": \"✅ I've Posted This\", \"callback_data\": \"posted_confirmed:\" + $json.tweet_id + \":\" + $json.token },\n      { \"text\": \"📋 Copy Tweet\", \"callback_data\": \"copy_tweet:\" + $json.tweet_id + \":\" + $json.token }\n    ]\n  ]\n}) }}"
+        }
       },
       "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",
-      "name": "Send Email",
-      "type": "n8n-nodes-base.emailSend",
-      "typeVersion": 2.1,
+      "name": "Telegram (Notification)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
       "position": [
         640,
         200
@@ -86,7 +87,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://heavy-planets-turn.loca.lt/api/retries/process",
+        "url": "https://postpilot-production-c051.up.railway.app/api/retries/process",
         "options": {}
       },
       "id": "b6f00f07-de80-4911-aa9b-5fb8995aeeef",
@@ -116,7 +117,7 @@
       "main": [
         [
           {
-            "node": "Send Email",
+            "node": "Telegram (Notification)",
             "type": "main",
             "index": 0
           }
