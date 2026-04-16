@@ -459,8 +459,9 @@ app.get('/api/post-intent', async (req, res) => {
     const tweetId = String(id);
     const user = String(username);
 
-    await enqueueRetry("RESOLVE_TWEET", { tweetId, username: user }, 1);
-    logger.info({ tweetId, username: user }, "Intercepted post intent. Queued detection polling.");
+    const processAfter = new Date(Date.now() + 10 * 60 * 1000);
+    await enqueueRetry("RESOLVE_TWEET", { tweetId, username: user }, 1, processAfter);
+    logger.info({ tweetId, username: user, processAfter }, "Intercepted post intent. Queued detection polling.");
   } catch (err: any) {
     logger.error({ err: err.message }, "Error enqueuing resolution task");
   }

@@ -17,8 +17,23 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 
     logger.info({ tweetId, username, attempt }, "Polling for posted tweet");
 
-    const maxRetries = 5;
-    const found = await pollTimelineForFingerprint(username, tweet.fingerprint);
+    let found: { tweetId: string, url: string } | null = null;
+    let failedFetches = 0;
+
+    // Up to 5 requests (3-5 seconds apart)
+    for (let tryNum = 1; tryNum <= 5; tryNum++) {
+      try {
+        found = await pollTimelineForFingerprint(username, tweet.fingerprint);
+        if (found) break; // Stop immediately if match found
+      } catch (err: any) {
+        failedFetches++;
+      }
+      
+      // Delay between retries: 3-5 seconds
+      if (tryNum < 5 && !found) {
+        await new Promise(r => setTimeout(r, 4000));
+      }
+    }
 
     if (found) {
       await prisma.tweet.update({
@@ -31,28 +46,25 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
           posted_at: new Date()
         }
       });
-      logger.info({ tweetId, foundUrl: found.url }, "Tweet successfully detected!");
+      logger.info({ tweetId, foundUrl: found.url }, "Tweet detected and confirmed");
 
-      // Enqueue Engagement Fetcher
-      await prisma.retryQueue.create({
-        data: {
-          task_type: "FETCH_ENGAGEMENT",
-          payload: { tweetId, username },
-          max_retries: 3
-        }
-      });
+      // First engagement fetch: 10-15 minutes after POSTED_CONFIRMED
+      const firstFetchTime = new Date(Date.now() + 15 * 60 * 1000);
+      await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime);
 
     } else {
-      if (attempt < maxRetries) {
-        // Enqueue retry with exponential backoff (simplified here to delay in processor)
-        await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1);
-        logger.info({ tweetId, attempt }, "Tweet not found yet. Retrying later.");
+      if (failedFetches >= 3 && attempt < 3) {
+        // High failure rate (e.g. rate limit), retry later (30-60 mins)
+        const later = new Date(Date.now() + 45 * 60 * 1000);
+        await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1, later);
+        logger.info({ tweetId }, "Scraping failed consistently, retrying later.");
       } else {
+        // Not found after retries
         await prisma.tweet.update({
           where: { id: tweetId },
           data: { status: 'ERROR' }
         });
-        logger.error({ tweetId }, "Failed to find tweet after max retries.");
+        logger.error({ tweetId }, "Tweet not found after max requests.");
       }
     }
   } catch (error: any) {
@@ -65,36 +77,33 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 async function pollTimelineForFingerprint(username: string, fp: string): Promise<{ tweetId: string, url: string } | null> {
   // Use public syndication endpoint or scraping. The syndication endpoint is somewhat rate-limited but usually works.
   try {
-    const url = `https://syndication.twitter.com/srv/timeline-profile/screen-name/${username}`;
-    // The modern syndication endpoint returns HTML inside a JSON if using the older widget, or just raw HTML.
-    // Let's use a known public endpoint or Nitter as fallback.
-    // Actually, `https://cdn.syndication.twimg.com/widgets/timelines/profile?screen_name=` doesn't work easily without a script token anymore.
-    // We will simulate a parser. Because this depends on Twitter's fragile DOM, we just do a simple fetch and regex.
+    // Only fetch when needed, with strict headers
+    const headers = { 
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/json',
+      'Accept-Language': 'en-US,en;q=0.9'
+    };
+
     const res = await fetch(`https://nitter.net/${username}/rss`, {
-      headers: { 'User-Agent': 'Mozilla/5.0' },
-      signal: AbortSignal.timeout(10000)
+      headers,
+      signal: AbortSignal.timeout(6000) // Timeout 5-8s as requested
     });
     
-    // Nitter frequently goes down, another option:
-    // https://rsshub.app/twitter/user/xyz
-    // Let's just create a generic parser that checks the body.
     if (!res.ok) {
         // Fallback to searching regular Twitter page (very likely blocked, but we try)
         const fallbackRes = await fetch(`https://twitter.com/${username}`, {
-            headers: { 'User-Agent': 'Googlebot/2.1 (+http://www.google.com/bot.html)' }
+            headers,
+            signal: AbortSignal.timeout(6000)
         });
         const html = await fallbackRes.text();
-        const extracted = checkHtmlForFingerprint(html, fp, username);
-        if (extracted) return extracted;
-        return null;
+        return checkHtmlForFingerprint(html, fp, username);
     }
 
     const text = await res.text();
-    const extracted = checkHtmlForFingerprint(text, fp, username);
-    return extracted;
+    return checkHtmlForFingerprint(text, fp, username);
   } catch (err: any) {
-    logger.warn({ err: err.message }, "Timeline polling failed");
-    return null;
+    logger.warn({ err: err.message }, "Timeline polling attempt failed");
+    throw err;
   }
 }
 
@@ -131,13 +140,14 @@ function checkHtmlForFingerprint(content: string, fingerprint: string, username:
     return null;
 }
 
-export async function enqueueRetry(taskType: string, payload: any, attempt: number) {
+export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date) {
   await prisma.retryQueue.create({
     data: {
       task_type: taskType,
       payload: payload,
       attempts: attempt,
-      max_retries: 5
+      max_retries: 5,
+      process_after: processAfter || new Date()
     }
   });
 }
@@ -147,7 +157,10 @@ export async function runWorker() {
   setInterval(async () => {
     try {
       const tasks = await prisma.retryQueue.findMany({
-        where: { status: 'PENDING' },
+        where: { 
+          status: 'PENDING',
+          process_after: { lte: new Date() }
+        },
         take: 10,
         orderBy: { created_at: 'asc' }
       });
@@ -161,7 +174,7 @@ export async function runWorker() {
           if (task.task_type === "RESOLVE_TWEET") {
             await resolveTweetAfterPost(payload.tweetId, payload.username, task.attempts);
           } else if (task.task_type === "FETCH_ENGAGEMENT") {
-            await fetchTweetEngagement(payload.tweetId);
+            await fetchTweetEngagement(payload.tweetId, task.attempts, payload.username);
           }
           await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
         } catch (e: any) {
@@ -180,14 +193,12 @@ export async function runWorker() {
   }, 10000);
 }
 
-export async function fetchTweetEngagement(tweetId: string) {
+export async function fetchTweetEngagement(tweetId: string, attempt: number, username: string) {
    const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
    if (!tweet || !tweet.x_tweet_id) return;
    
-   logger.info({ tweetId }, "Fetching engagement...");
+   logger.info({ tweetId, attempt }, "Fetching tracking engagement...");
    
-   // This is difficult without API, but some alternatives exist:
-   // Syndication API provides metrics sometimes:
    try {
      const res = await fetch(`https://cdn.syndication.twimg.com/tweet-result?id=${tweet.x_tweet_id}`);
      if (res.ok) {
@@ -195,6 +206,7 @@ export async function fetchTweetEngagement(tweetId: string) {
        const likes = data?.favorite_count || 0;
        const retweets = (data?.retweet_count || 0) + (data?.quote_count || 0);
 
+       // Upsert main engagement
        await prisma.engagement.upsert({
          where: { tweet_id: tweetId },
          update: { likes, retweets, fetched_at: new Date() },
@@ -205,7 +217,33 @@ export async function fetchTweetEngagement(tweetId: string) {
            fetched_at: new Date()
          }
        });
-       logger.info({ tweetId, likes, retweets }, "Engagement stored.");
+
+       // Create historical snapshot
+       await prisma.engagementSnapshot.create({
+         data: {
+           tweet_id: tweetId,
+           likes,
+           retweets,
+           fetched_at: new Date()
+         }
+       });
+
+       logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
+
+       // Schedule additional fetches (Engagement Tracking Over Time)
+       let nextFetchDate = null;
+       // Attempt 1 -> 1 hour
+       if (attempt === 1) nextFetchDate = new Date(Date.now() + 1 * 60 * 60 * 1000);
+       // Attempt 2 -> 6 hours
+       else if (attempt === 2) nextFetchDate = new Date(Date.now() + 6 * 60 * 60 * 1000);
+       // Attempt 3 -> 24 hours
+       else if (attempt === 3) nextFetchDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+       if (nextFetchDate) {
+         await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
+         logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
+       }
+
      } else {
        throw new Error(`Failed to fetch engagement for ${tweet.x_tweet_id}`);
      }
