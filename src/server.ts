@@ -47,7 +47,7 @@ function verifyToken(id: string, token: string) {
 }
 
 // Add helper for background processing
-async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, callbackUrl?: string) {
+async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, callbackUrl?: string, previousDraft?: string, currentFeedback?: string) {
   try {
     const startAgent = Date.now();
     logger.info({ tweetId }, 'Starting background generation...');
@@ -56,6 +56,8 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     const finalState = await agentGraph.invoke({
       timeOfDay: time_of_day,
       topic: topic ?? "",
+      previousDraft: previousDraft ?? "",
+      currentFeedback: currentFeedback ?? "",
       iterationCount: 0
     }) as any;
 
@@ -351,14 +353,18 @@ app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
   if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
 
-  await prisma.tweet.update({
+  const updatedTweet = await prisma.tweet.update({
     where: { id },
     data: { edited_topic: new_topic }
   });
 
-  logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting regeneration');
-  // Trigger regeneration flow here or return success and let client requery
-  res.json({ success: true, message: "Topic updated. Regenerate draft to apply effects." });
+  logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting immediate regeneration');
+  
+  const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
+  processGenerationInBackground(id, updatedTweet.time_of_day, new_topic, webhookUrl)
+    .catch(err => logger.error({ err }, 'Regeneration background error'));
+    
+  res.json({ success: true, message: "Regenerating! You'll receive a new Telegram message shortly." });
 });
 
 app.post('/api/feedback', async (req, res) => {
@@ -372,8 +378,23 @@ app.post('/api/feedback', async (req, res) => {
     }
   });
 
-  logger.info({ tweet_id: id }, 'Feedback received');
-  res.json({ success: true });
+  const tweet = await prisma.tweet.findUnique({ 
+    where: { id },
+    include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
+  });
+  
+  logger.info({ tweet_id: id }, 'Feedback received, requesting immediate regeneration');
+
+  if (tweet) {
+    const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
+    const topicToUse = tweet.edited_topic || tweet.original_topic;
+    const oldDraft = tweet.versions[0]?.content || "";
+    
+    processGenerationInBackground(id, tweet.time_of_day, topicToUse, webhookUrl, oldDraft, feedback)
+      .catch(err => logger.error({ err }, 'Regeneration background error'));
+  }
+
+  res.json({ success: true, message: "Feedback received! Regenerating tweet. You'll receive a new Telegram message shortly." });
 });
 
 app.post('/api/retries/process', async (req, res) => {
