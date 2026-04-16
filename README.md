@@ -252,4 +252,3 @@ Update `package.json`:
 | Scheduling | n8n |
 | Notifications | Telegram Bot API |
 | Logging | Pino |
-| Validation | Zod |
