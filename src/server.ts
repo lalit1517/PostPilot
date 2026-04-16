@@ -56,6 +56,7 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
 
     // Full quality run - no short-circuiting!
     const finalState = await agentGraph.invoke({
+      tweetId,
       timeOfDay: time_of_day,
       topic: topic ?? "",
       previousDraft: previousDraft ?? "",

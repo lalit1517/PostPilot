@@ -3,13 +3,16 @@ import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
+import { canCallLLM, recordLLMCall } from "./rateGuard.js";
 
 const AgentState = Annotation.Root({
+  tweetId: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   topic: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   timeOfDay: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "morning" }),
   context: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   recentFeedback: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   recentTopics: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
+  learnedPersona: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   personaParameters: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   draft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   score: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
@@ -31,7 +34,7 @@ const baseConfig = {
 
 const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety buffer
 
-const llm = new ChatGoogleGenerativeAI({
+export const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
   model: "gemini-2.5-flash", // Stable, reliable, and handles tight constraints without trimming
 }).withFallbacks([
@@ -49,11 +52,16 @@ async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
 
-  const [topTweetsQuery, recentFeedbackQuery, recentTopicsQuery] = await Promise.all([
+  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile] = await Promise.all([
     prisma.engagement.findMany({
       orderBy: { likes: 'desc' },
       take: 5,
       include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
+    }),
+    prisma.feedback.findMany({
+      orderBy: { weighted_score: 'desc' },
+      take: 5,
+      where: { weighted_score: { not: null } }
     }),
     prisma.feedback.findMany({
       orderBy: { created_at: 'desc' },
@@ -63,17 +71,27 @@ async function contextLoader(state: typeof AgentState.State) {
       orderBy: { created_at: 'desc' },
       take: 10,
       select: { original_topic: true, edited_topic: true }
+    }),
+    prisma.personaProfile.findFirst({
+      where: { is_active: true },
+      orderBy: { version: 'desc' }
     })
-  ]); // ✅ FIX 4: Run all DB queries in parallel, not sequentially
+  ]);
+
+  // Use weighted feedback if 3+ exist, otherwise fallback to unweighted
+  const feedbackSource = weightedFeedbackQuery.length >= 3
+    ? weightedFeedbackQuery
+    : [...weightedFeedbackQuery, ...unweightedFeedbackQuery].slice(0, 5);
 
   const context = topTweetsQuery
     .map(t => t.tweet.versions[0]?.content)
     .filter(Boolean) as string[];
-  const recentFeedback = recentFeedbackQuery.map(f => `[Feedback from ${f.created_at.toISOString().split('T')[0]}]: ${f.feedback_text}`);
+  const recentFeedback = feedbackSource.map(f => `[Feedback from ${f.created_at.toISOString().split('T')[0]}]: ${f.feedback_text}`);
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
+  const learnedPersona = activeProfile?.profile_text ?? "";
 
-  logger.info({ duration: `${Date.now() - start}ms` }, "Finished contextLoader");
-  return { context, recentFeedback, recentTopics, iterationCount: state.iterationCount || 0 };
+  logger.info({ duration: `${Date.now() - start}ms`, hasPersona: !!learnedPersona }, "Finished contextLoader");
+  return { context, recentFeedback, recentTopics, learnedPersona, iterationCount: state.iterationCount || 0 };
 }
 
 async function personaAdapter(state: typeof AgentState.State) {
@@ -87,8 +105,13 @@ async function personaAdapter(state: typeof AgentState.State) {
     ? `\n[HISTORICAL STYLE GUIDELINES]\nThe user provided this feedback on previous posts. Extract only STYLISTIC preferences (tone, brevity, formatting) and IGNORE specific topic commands or subject matter from this list unless it explicitly says "from now on":\n${state.recentFeedback.map(f => `- ${f}`).join('\n')}\n`
     : "";
 
+  const learnedPersonaBlock = state.learnedPersona
+    ? `\n[LEARNED STYLE PROFILE — derived from your best-performing posts. Follow these patterns closely]:
+${state.learnedPersona}\n`
+    : "";
+
   const personaParameters = `You are a builder crafting content for X.
-Tone: ${toneInstruction}
+${learnedPersonaBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
@@ -119,6 +142,17 @@ Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no
 Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
 
   try {
+    const { allowed, reason } = await canCallLLM();
+    if (!allowed) {
+      logger.warn({ reason }, "LLM rate limit reached in contentGenerator, using fallback");
+      return {
+        topic: state.topic || "General Update",
+        draft: "Consistently building and shipping every day. Progress is the only metric that matters.",
+        iterationCount: 1
+      };
+    }
+    await recordLLMCall("gemini-2.5-flash", "generate");
+
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
     const content = (res.content as string).trim();
 
@@ -152,16 +186,44 @@ async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
   const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
 
+  let score = 10;
+  let critique = "Skipped critique due to timeout.";
+
   try {
-    const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-    const parts = (res.content as string).split('|');
-    const score = parseFloat(parts[0] || '0') || 0;
-    const critique = parts[1] || '';
-    return { score, critique };
+    const { allowed, reason } = await canCallLLM();
+    if (!allowed) {
+      logger.warn({ reason }, "LLM rate limit reached in qualityScorer, using default score");
+    } else {
+      await recordLLMCall("gemini-2.5-flash", "score");
+      const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
+      const parts = (res.content as string).split('|');
+      score = parseFloat(parts[0] || '0') || 0;
+      critique = parts[1] || '';
+    }
   } catch (err) {
     logger.warn("Quality Scorer timed out. Proceeding with default score.");
-    return { score: 10, critique: "Skipped critique due to timeout." }; // Assume good enough to avoid crashing
   }
+
+  // Persist quality_score to TweetVersion
+  if (state.tweetId) {
+    try {
+      const latestVersion = await prisma.tweetVersion.findFirst({
+        where: { tweet_id: state.tweetId },
+        orderBy: { version: 'desc' },
+        select: { id: true },
+      });
+      if (latestVersion) {
+        await prisma.tweetVersion.update({
+          where: { id: latestVersion.id },
+          data: { quality_score: score },
+        });
+      }
+    } catch (err) {
+      logger.warn("Failed to persist quality_score to TweetVersion");
+    }
+  }
+
+  return { score, critique };
 }
 
 async function autoRefiner(state: typeof AgentState.State) {
@@ -169,13 +231,20 @@ async function autoRefiner(state: typeof AgentState.State) {
   const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}\n\nSTRICT: Ensure the new version is a full, finished tweet that ends with a period. No incomplete sentences. No intro text. Just the tweet.`;
 
   try {
+    const { allowed, reason } = await canCallLLM();
+    if (!allowed) {
+      logger.warn({ reason }, "LLM rate limit reached in autoRefiner, keeping original draft");
+      return { draft: state.draft, iterationCount: 2 };
+    }
+    await recordLLMCall("gemini-2.5-flash", "refine");
+
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
     let draft = (res.content as string).trim();
     if (draft && !draft.match(/[.!?]$/)) draft += ".";
     return { draft, iterationCount: 2 };
   } catch (err) {
     logger.warn("Auto Refiner timed out. Using original draft.");
-    return { draft: state.draft, iterationCount: 2 }; // Keep original draft on failure
+    return { draft: state.draft, iterationCount: 2 };
   }
 }
 

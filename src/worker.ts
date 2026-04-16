@@ -1,6 +1,9 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { extractFingerprintHex } from './fingerprint.js';
+import { computeOutcomeScore } from './outcomeScorer.js';
+import { reweightFeedback } from './feedbackWeighter.js';
+import { evolvePersona } from './personaEvolver.js';
 // Use native fetch in Node 20+
 
 // In-memory queue to prevent overlapping polls
@@ -164,12 +167,27 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
   });
 }
 
+// Track last reweight time in-memory (6h gate)
+let lastReweightAt = 0;
+
 // Background scheduler
 export async function runWorker() {
   setInterval(async () => {
     try {
+      // 6-hour feedback reweight check
+      const sixHoursMs = 6 * 60 * 60_000;
+      if (Date.now() - lastReweightAt >= sixHoursMs) {
+        try {
+          await reweightFeedback();
+          lastReweightAt = Date.now();
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error({ err: message }, "Scheduled reweightFeedback failed");
+        }
+      }
+
       const tasks = await prisma.retryQueue.findMany({
-        where: { 
+        where: {
           status: 'PENDING',
           process_after: { lte: new Date() }
         },
@@ -179,7 +197,7 @@ export async function runWorker() {
 
       for (const task of tasks) {
         const payload = task.payload as any;
-        
+
         await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PROCESSING' } });
 
         try {
@@ -187,20 +205,23 @@ export async function runWorker() {
             await resolveTweetAfterPost(payload.tweetId, payload.username, task.attempts);
           } else if (task.task_type === "FETCH_ENGAGEMENT") {
             await fetchTweetEngagement(payload.tweetId, task.attempts, payload.username);
+          } else if (task.task_type === "EVOLVE_PERSONA") {
+            await evolvePersona();
           }
           await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
-        } catch (e: any) {
-          logger.error({ id: task.id, err: e.message }, "Task processing failed");
+        } catch (e: unknown) {
+          const message = e instanceof Error ? e.message : String(e);
+          logger.error({ id: task.id, err: message }, "Task processing failed");
           if (task.attempts >= task.max_retries) {
-            await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: e.message } });
+            await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: message } });
           } else {
-             // Reset back to PENDING for the next round (in a real system, you'd add a processing delay)
             await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PENDING', attempts: task.attempts + 1 } });
           }
         }
       }
-    } catch (e: any) {
-      logger.error({ err: e.message }, "Worker loop error");
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      logger.error({ err: message }, "Worker loop error");
     }
   }, 10000);
 }
@@ -262,9 +283,32 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
         else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
         else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
         else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
-        else if (attempt === 5) nextFetchDelay = 24 * 60 * 60 * 1000; // 48h + 24h = 72h (Day 3)
 
-        if (nextFetchDelay > 0) {
+        if (attempt === 5) {
+          // Final snapshot (72h) — close the engagement loop
+          try {
+            await computeOutcomeScore(tweetId);
+            await reweightFeedback();
+
+            // Check if 5+ new high-tier tweets exist since last persona evolution
+            const lastEvolution = await prisma.personaProfile.findFirst({
+              orderBy: { created_at: 'desc' },
+              select: { created_at: true },
+            });
+            const sinceDate = lastEvolution?.created_at ?? new Date(0);
+            const highTierCount = await prisma.tweetOutcome.count({
+              where: { tier: 'high', computed_at: { gt: sinceDate } },
+            });
+
+            if (highTierCount >= 5) {
+              await enqueueRetry("EVOLVE_PERSONA", {}, 1);
+              logger.info({ highTierCount }, "Enqueued EVOLVE_PERSONA task");
+            }
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            logger.error({ tweetId, err: message }, "Post-engagement scoring/evolution failed");
+          }
+        } else if (nextFetchDelay > 0) {
           const jitteredNextDelay = getJitterDelay(nextFetchDelay);
           const nextFetchDate = new Date(Date.now() + jitteredNextDelay);
           await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
