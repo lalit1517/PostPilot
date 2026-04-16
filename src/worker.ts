@@ -6,6 +6,10 @@ import { extractFingerprintHex } from './fingerprint.js';
 // In-memory queue to prevent overlapping polls
 const activePolls = new Set<string>();
 
+function getJitterDelay(baseDelayMs: number) {
+  return baseDelayMs + Math.floor(Math.random() * 2000);
+}
+
 export async function resolveTweetAfterPost(tweetId: string, username: string, attempt: number = 1) {
   if (activePolls.has(tweetId)) return;
   activePolls.add(tweetId);
@@ -20,18 +24,18 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
     let found: { tweetId: string, url: string } | null = null;
     let failedFetches = 0;
 
-    // Up to 5 requests (3-5 seconds apart)
+    // Up to 5 requests in this execution
     for (let tryNum = 1; tryNum <= 5; tryNum++) {
       try {
         found = await pollTimelineForFingerprint(username, tweet.fingerprint);
-        if (found) break; // Stop immediately if match found
+        if (found) break;
       } catch (err: any) {
         failedFetches++;
+        logger.warn({ tweetId, tryNum, err: err.message }, "Single poll attempt failed");
       }
       
-      // Delay between retries: 3-5 seconds
       if (tryNum < 5 && !found) {
-        await new Promise(r => setTimeout(r, 4000));
+        await new Promise(r => setTimeout(r, getJitterDelay(4000)));
       }
     }
 
@@ -53,18 +57,18 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
       await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime);
 
     } else {
-      if (failedFetches >= 3 && attempt < 3) {
-        // High failure rate (e.g. rate limit), retry later (30-60 mins)
-        const later = new Date(Date.now() + 45 * 60 * 1000);
+      // Re-schedule ONE additional retry (delayed) before marking as error
+      if (attempt < 2) {
+        const fallbackDelay = getJitterDelay(45 * 60 * 1000); // 45-47 mins
+        const later = new Date(Date.now() + fallbackDelay);
         await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1, later);
-        logger.info({ tweetId }, "Scraping failed consistently, retrying later.");
+        logger.info({ tweetId, nextAttemptAt: later }, "Tweet not found yet. Scheduling ONE final delayed retry.");
       } else {
-        // Not found after retries
         await prisma.tweet.update({
           where: { id: tweetId },
           data: { status: 'ERROR' }
         });
-        logger.error({ tweetId }, "Tweet not found after max requests.");
+        logger.error({ tweetId }, "Tweet not found after initial + fallback retries. Giving up.");
       }
     }
   } catch (error: any) {
@@ -75,36 +79,44 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 }
 
 async function pollTimelineForFingerprint(username: string, fp: string): Promise<{ tweetId: string, url: string } | null> {
-  // Use public syndication endpoint or scraping. The syndication endpoint is somewhat rate-limited but usually works.
-  try {
-    // Only fetch when needed, with strict headers
-    const headers = { 
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/json',
-      'Accept-Language': 'en-US,en;q=0.9'
-    };
+  const headers = { 
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/json',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cache-Control': 'no-cache'
+  };
 
-    const res = await fetch(`https://nitter.net/${username}/rss`, {
-      headers,
-      signal: AbortSignal.timeout(6000) // Timeout 5-8s as requested
-    });
-    
-    if (!res.ok) {
-        // Fallback to searching regular Twitter page (very likely blocked, but we try)
-        const fallbackRes = await fetch(`https://twitter.com/${username}`, {
-            headers,
-            signal: AbortSignal.timeout(6000)
-        });
-        const html = await fallbackRes.text();
-        return checkHtmlForFingerprint(html, fp, username);
+  const sources = [
+    { name: 'Nitter RSS', url: `https://nitter.net/${username}/rss` },
+    { name: 'Twitter Native', url: `https://twitter.com/${username}` }
+  ];
+
+  for (const source of sources) {
+    try {
+      const res = await fetch(source.url, {
+        headers,
+        signal: AbortSignal.timeout(8000)
+      });
+
+      if (!res.ok) {
+        logger.warn({ source: source.name, status: res.status }, "Scraping source returned error status");
+        continue;
+      }
+
+      const text = await res.text();
+      if (!text || text.length < 200) {
+        logger.warn({ source: source.name, len: text?.length }, "Empty or suspicious response from source");
+        continue;
+      }
+
+      const result = checkHtmlForFingerprint(text, fp, username);
+      if (result) return result;
+    } catch (err: any) {
+      logger.warn({ source: source.name, err: err.message }, "Scraping source fetch failed");
     }
-
-    const text = await res.text();
-    return checkHtmlForFingerprint(text, fp, username);
-  } catch (err: any) {
-    logger.warn({ err: err.message }, "Timeline polling attempt failed");
-    throw err;
   }
+
+  return null;
 }
 
 function checkHtmlForFingerprint(content: string, fingerprint: string, username: string) {
@@ -212,44 +224,59 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
 
    logger.info({ tweetId, attempt }, "Fetching tracking engagement...");
    
-   try {
-     const res = await fetch(`https://cdn.syndication.twimg.com/tweet-result?id=${tweet.x_tweet_id}`);
-     if (res.ok) {
-       const data = await res.json();
-       const likes = data?.favorite_count || 0;
-       const retweets = (data?.retweet_count || 0) + (data?.quote_count || 0);
+    try {
+      const res = await fetch(`https://cdn.syndication.twimg.com/tweet-result?id=${tweet.x_tweet_id}`, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json'
+        },
+        signal: AbortSignal.timeout(7000)
+      });
 
-       // Every fetch should INSERT a new row
-       await prisma.engagement.create({
-         data: {
-           tweet_id: tweetId,
-           likes,
-           retweets,
-           fetched_at: new Date()
-         }
-       });
+      if (res.ok) {
+        const data = await res.json();
+        
+        // Validate response structure before parsing
+        if (!data || typeof data !== 'object') {
+          throw new Error("Engagement source returned invalid object");
+        }
 
-       logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
+        const likes = Number(data?.favorite_count || 0);
+        const retweets = Number((data?.retweet_count || 0) + (data?.quote_count || 0));
 
-       // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
-       let nextFetchDelay = 0;
-       if (attempt === 1) nextFetchDelay = 50 * 60 * 1000; // 10m + 50m = 1h
-       else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
-       else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
-       else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
-       else if (attempt === 5) nextFetchDelay = 24 * 60 * 60 * 1000; // 48h + 24h = 72h (Day 3)
+        // Every fetch should INSERT a new row
+        await prisma.engagement.create({
+          data: {
+            tweet_id: tweetId,
+            likes,
+            retweets,
+            fetched_at: new Date()
+          }
+        });
 
-       if (nextFetchDelay > 0) {
-         const nextFetchDate = new Date(Date.now() + nextFetchDelay);
-         await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
-         logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
-       }
+        logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
 
-     } else {
-       throw new Error(`Failed to fetch engagement for ${tweet.x_tweet_id}`);
-     }
-   } catch (error: any) {
-     logger.warn({ err: error.message }, "Engagement fetch failed.");
-     throw error;
-   }
+        // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
+        let nextFetchDelay = 0;
+        if (attempt === 1) nextFetchDelay = 50 * 60 * 1000; // 10m + 50m = 1h
+        else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
+        else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
+        else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
+        else if (attempt === 5) nextFetchDelay = 24 * 60 * 60 * 1000; // 48h + 24h = 72h (Day 3)
+
+        if (nextFetchDelay > 0) {
+          const jitteredNextDelay = getJitterDelay(nextFetchDelay);
+          const nextFetchDate = new Date(Date.now() + jitteredNextDelay);
+          await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
+          logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
+        }
+
+      } else {
+        logger.warn({ tweetId, status: res.status, attempt }, "Failed to fetch engagement from source");
+        throw new Error(`Source returned status ${res.status}`);
+      }
+    } catch (error: any) {
+      logger.error({ tweetId, err: error.message, attempt }, "Engagement fetch failed.");
+      throw error;
+    }
 }
