@@ -25,6 +25,7 @@ model Tweet {
   versions       TweetVersion[]
   feedbacks      Feedback[]
   engagement     Engagement?
+  snapshots      EngagementSnapshot[]
 }
 
 model TweetVersion {
@@ -55,6 +56,7 @@ model RetryQueue {
   max_retries Int      @default(3)
   status      String   @default("PENDING") // PENDING, FAILED, COMPLETED
   last_error  String?
+  process_after DateTime @default(now())
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
 }
@@ -69,3 +71,15 @@ model Engagement {
   
   tweet       Tweet    @relation(fields: [tweet_id], references: [id])
 }
+
+model EngagementSnapshot {
+  id          String   @id @default(uuid())
+  tweet_id    String
+  likes       Int      @default(0)
+  retweets    Int      @default(0)
+  impressions Int      @default(0)
+  fetched_at  DateTime @default(now())
+  
+  tweet       Tweet    @relation(fields: [tweet_id], references: [id])
+}
+
