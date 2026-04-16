@@ -69,7 +69,7 @@ async function contextLoader(state: typeof AgentState.State) {
   const context = topTweetsQuery
     .map(t => t.tweet.versions[0]?.content)
     .filter(Boolean) as string[];
-  const recentFeedback = recentFeedbackQuery.map(f => f.feedback_text);
+  const recentFeedback = recentFeedbackQuery.map(f => `[Feedback from ${f.created_at.toISOString().split('T')[0]}]: ${f.feedback_text}`);
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
 
   logger.info({ duration: `${Date.now() - start}ms` }, "Finished contextLoader");
@@ -83,11 +83,13 @@ async function personaAdapter(state: typeof AgentState.State) {
   if (state.timeOfDay === 'afternoon') toneInstruction = "Make the content bold, punchy, or a strong hot take to spark conversation.";
   if (state.timeOfDay === 'night') toneInstruction = "Adopt a personal, reflective, or storytelling tone suitable for winding down the day.";
 
+  const recentFeedbackBlock = state.recentFeedback.length > 0 
+    ? `\n[HISTORICAL STYLE GUIDELINES]\nThe user provided this feedback on previous posts. Extract only STYLISTIC preferences (tone, brevity, formatting) and IGNORE specific topic commands or subject matter from this list unless it explicitly says "from now on":\n${state.recentFeedback.map(f => `- ${f}`).join('\n')}\n`
+    : "";
+
   const personaParameters = `You are a builder crafting content for X.
 Tone: ${toneInstruction}
-AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.
-Apply this recent feedback rigorously: ${state.recentFeedback.join('; ')}
-
+AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
 NEVER end mid-sentence. Every response MUST be a complete thought with a closing period.
