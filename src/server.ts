@@ -182,6 +182,108 @@ app.get('/api/status', async (req, res) => {
   });
 });
 
+// HTML UI for Topic Editing
+app.get('/api/view-edit', (req, res) => {
+  const { id, token } = req.query;
+  if (!id || !token) return res.status(400).send("Missing id or token");
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Edit Topic</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="font-family: sans-serif; padding: 2rem; max-width: 600px; margin: auto;">
+      <h2>Edit Topic</h2>
+      <form id="editForm">
+        <input type="hidden" name="id" value="${escapeHTML(String(id))}">
+        <input type="hidden" name="token" value="${escapeHTML(String(token))}">
+        <label style="display:block; margin-bottom: 0.5rem;">New Topic:</label>
+        <textarea name="new_topic" rows="4" style="width: 100%; margin-bottom: 1rem; padding: 0.5rem;" required></textarea>
+        <br>
+        <button type="submit" style="background:#0F1419; color:white; padding: 0.75rem 1.5rem; border:none; border-radius: 99px; cursor:pointer;">Update Topic</button>
+      </form>
+      <script>
+        document.getElementById('editForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const formData = new FormData(e.target);
+          const data = Object.fromEntries(formData.entries());
+          e.submitter.innerText = 'Sending...';
+          e.submitter.style.opacity = '0.5';
+          try {
+            const res = await fetch('/api/edit', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(data)
+            });
+            const result = await res.json();
+            if (result.success) {
+              alert(result.message || 'Success! You can now regenerate the draft.');
+              e.target.reset();
+            } else {
+              alert('Error: ' + result.error);
+            }
+          } catch (err) {
+            alert('Failed to submit. Please check your connection.');
+          }
+          e.submitter.innerText = 'Update Topic';
+          e.submitter.style.opacity = '1';
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
+
+// HTML UI for Feedback
+app.get('/api/view-feedback', (req, res) => {
+  const { id, token } = req.query;
+  if (!id || !token) return res.status(400).send("Missing id or token");
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+    <head><title>Provide Feedback</title><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+    <body style="font-family: sans-serif; padding: 2rem; max-width: 600px; margin: auto;">
+      <h2>Provide Feedback</h2>
+      <form id="feedbackForm">
+        <input type="hidden" name="id" value="${escapeHTML(String(id))}">
+        <input type="hidden" name="token" value="${escapeHTML(String(token))}">
+        <label style="display:block; margin-bottom: 0.5rem;">Feedback (e.g. "Too formal, make it funnier"):</label>
+        <textarea name="feedback" rows="4" style="width: 100%; margin-bottom: 1rem; padding: 0.5rem;" required></textarea>
+        <br>
+        <button type="submit" style="background:#0F1419; color:white; padding: 0.75rem 1.5rem; border:none; border-radius: 99px; cursor:pointer;">Submit Feedback</button>
+      </form>
+      <script>
+        document.getElementById('feedbackForm').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          const formData = new FormData(e.target);
+          const data = Object.fromEntries(formData.entries());
+          e.submitter.innerText = 'Sending...';
+          e.submitter.style.opacity = '0.5';
+          try {
+            const res = await fetch('/api/feedback', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(data)
+            });
+            const result = await res.json();
+            if (result.success) {
+              alert('Feedback submitted successfully!');
+              e.target.reset();
+            } else {
+              alert('Error: ' + result.error);
+            }
+          } catch (err) {
+            alert('Failed to submit. Please check your connection.');
+          }
+          e.submitter.innerText = 'Submit Feedback';
+          e.submitter.style.opacity = '1';
+        });
+      </script>
+    </body>
+    </html>
+  `);
+});
+
 app.post('/api/telegram/webhook', async (req, res) => {
   const { callback_query, message } = req.body;
 
