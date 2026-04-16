@@ -2,6 +2,7 @@ node_modules
 .env
 .agents
 .claude
+.code-review-graph
 dist
 build
 .next
