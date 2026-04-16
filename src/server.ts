@@ -209,7 +209,7 @@ app.get('/api/status', async (req, res) => {
 
   const tweet = await prisma.tweet.findUnique({
     where: { id: String(id) },
-    include: { 
+    include: {
       versions: { orderBy: { version: 'desc' }, take: 1 },
       engagements: { orderBy: { fetched_at: 'desc' }, take: 1 }
     }
@@ -376,7 +376,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
       });
 
       // Queuing 10m delayed resolution
-      const username = process.env.X_USERNAME || "lalit_notFound";
+      const username = process.env.X_USERNAME;
       const processAfter = new Date(Date.now() + 10 * 60 * 1000);
       try {
         await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, 1, processAfter);
