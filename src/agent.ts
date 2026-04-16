@@ -14,6 +14,8 @@ const AgentState = Annotation.Root({
   draft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   score: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
   critique: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
+  previousDraft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
+  currentFeedback: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   iterationCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
 });
 
@@ -98,8 +100,13 @@ async function contentGenerator(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info({ topic: state.topic }, "Running contentGenerator (LLM Call 1)...");
 
+  let revisionBlock = "";
+  if (state.previousDraft && state.currentFeedback) {
+    revisionBlock = `\n\n[REVISION MODE ACTIVATED]\nYour previous draft was: "${state.previousDraft}"\nThe user rejected it with this feedback: "${state.currentFeedback}"\nREQUIREMENT: You MUST keep the topic but completely rewrite the draft specifically to address the user's feedback!\n\n`;
+  }
+
   const prompt = `${state.personaParameters}
-${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}
+${state.topic ? `Topic: ${state.topic}` : 'Generate a trending topic and a tweet.'}${revisionBlock}
 Target: Generate both a Topic and a Draft. 
 Output Format: TOPIC|DRAFT
 
