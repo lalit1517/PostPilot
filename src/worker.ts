@@ -48,8 +48,8 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
       });
       logger.info({ tweetId, foundUrl: found.url }, "Tweet detected and confirmed");
 
-      // First engagement fetch: 10-15 minutes after POSTED_CONFIRMED
-      const firstFetchTime = new Date(Date.now() + 15 * 60 * 1000);
+      // First engagement fetch: 10 minutes after POSTED_CONFIRMED
+      const firstFetchTime = new Date(Date.now() + 10 * 60 * 1000);
       await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime);
 
     } else {
@@ -197,6 +197,19 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
    const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
    if (!tweet || !tweet.x_tweet_id) return;
    
+   // Avoid duplicates: Check if we have a record within the last 5 minutes
+   const recentEngagement = await prisma.engagement.findFirst({
+     where: { 
+       tweet_id: tweetId,
+       fetched_at: { gte: new Date(Date.now() - 5 * 60 * 1000) }
+     }
+   });
+
+   if (recentEngagement) {
+     logger.info({ tweetId }, "Skipping engagement fetch: minimum gap not met");
+     return;
+   }
+
    logger.info({ tweetId, attempt }, "Fetching tracking engagement...");
    
    try {
@@ -206,20 +219,8 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
        const likes = data?.favorite_count || 0;
        const retweets = (data?.retweet_count || 0) + (data?.quote_count || 0);
 
-       // Upsert main engagement
-       await prisma.engagement.upsert({
-         where: { tweet_id: tweetId },
-         update: { likes, retweets, fetched_at: new Date() },
-         create: {
-           tweet_id: tweetId,
-           likes,
-           retweets,
-           fetched_at: new Date()
-         }
-       });
-
-       // Create historical snapshot
-       await prisma.engagementSnapshot.create({
+       // Every fetch should INSERT a new row
+       await prisma.engagement.create({
          data: {
            tweet_id: tweetId,
            likes,
@@ -230,16 +231,16 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
 
        logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
 
-       // Schedule additional fetches (Engagement Tracking Over Time)
-       let nextFetchDate = null;
-       // Attempt 1 -> 1 hour
-       if (attempt === 1) nextFetchDate = new Date(Date.now() + 1 * 60 * 60 * 1000);
-       // Attempt 2 -> 6 hours
-       else if (attempt === 2) nextFetchDate = new Date(Date.now() + 6 * 60 * 60 * 1000);
-       // Attempt 3 -> 24 hours
-       else if (attempt === 3) nextFetchDate = new Date(Date.now() + 24 * 60 * 60 * 1000);
+       // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
+       let nextFetchDelay = 0;
+       if (attempt === 1) nextFetchDelay = 50 * 60 * 1000; // 10m + 50m = 1h
+       else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
+       else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
+       else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
+       else if (attempt === 5) nextFetchDelay = 24 * 60 * 60 * 1000; // 48h + 24h = 72h (Day 3)
 
-       if (nextFetchDate) {
+       if (nextFetchDelay > 0) {
+         const nextFetchDate = new Date(Date.now() + nextFetchDelay);
          await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
          logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
        }

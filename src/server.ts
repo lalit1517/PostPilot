@@ -209,7 +209,10 @@ app.get('/api/status', async (req, res) => {
 
   const tweet = await prisma.tweet.findUnique({
     where: { id: String(id) },
-    include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
+    include: { 
+      versions: { orderBy: { version: 'desc' }, take: 1 },
+      engagements: { orderBy: { fetched_at: 'desc' }, take: 1 }
+    }
   });
 
   if (!tweet) return res.status(404).json({ error: "Job not found" });
@@ -218,7 +221,24 @@ app.get('/api/status', async (req, res) => {
     id: tweet.id,
     status: tweet.status,
     draft: tweet.versions[0]?.content,
-    score: tweet.score
+    score: tweet.score,
+    engagement: tweet.engagements[0] || null
+  });
+});
+
+app.get('/api/analytics', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).json({ error: "Missing ID" });
+
+  const history = await prisma.engagement.findMany({
+    where: { tweet_id: String(id) },
+    orderBy: { fetched_at: 'asc' }
+  });
+
+  res.json({
+    tweetId: id,
+    snapshotCount: history.length,
+    history
   });
 });
 
