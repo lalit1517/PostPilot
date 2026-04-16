@@ -375,7 +375,17 @@ app.post('/api/telegram/webhook', async (req, res) => {
         }
       });
 
-      await sendTelegramMessage(chatId, `✅ Marked as Posted!\nTweet ID: \`${tweetId}\``);
+      // Queuing 10m delayed resolution
+      const username = process.env.X_USERNAME || "lalit_notFound";
+      const processAfter = new Date(Date.now() + 10 * 60 * 1000);
+      try {
+        await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, 1, processAfter);
+        logger.info({ tweetId, username, processAfter }, "Manual confirmation. Queued detector.");
+      } catch (e) {
+        logger.error("Failed to enqueue resolution");
+      }
+
+      await sendTelegramMessage(chatId, `✅ Marked as Posted!\nVerification polling started (10m delay).\nTweet ID: \`${tweetId}\``);
     } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
       await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
