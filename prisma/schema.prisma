@@ -18,6 +18,7 @@ model Tweet {
   status         String         @default("PENDING") // PENDING, APPROVED, POSTED_CONFIRMED, ERROR
   intent_url     String?
   live_url       String?
+  fingerprint    String?        @unique
   posted_at      DateTime?
   created_at     DateTime       @default(now())
   

@@ -4,6 +4,8 @@ import crypto from 'crypto';
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { agentGraph } from './agent.js';
+import { generateFingerprint, appendFingerprint } from './fingerprint.js';
+import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
 app.use(express.json());
@@ -31,8 +33,8 @@ const CALL_TIMEOUT = 300_000; // Increased to 5 minutes for stable generation
 
 function escapeHTML(str: string) {
   return str.replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
 }
 
 function verifyToken(id: string, token: string) {
@@ -61,23 +63,51 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
       iterationCount: 0
     }) as any;
 
-    const tweetDraft = finalState.draft;
+    let tweetDraft = finalState.draft;
     const finalTopic = finalState.topic;
 
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
 
-    // Generate Intent URL
-    const encodedTweet = encodeURIComponent(tweetDraft);
-    const intentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
-    const approveToken = generateToken(tweetId);
-    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+    const currentTweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
 
-    const currentTweet = await prisma.tweet.findUnique({ where: { id: tweetId }});
-    
+    // Fingerprint injection
+    let fp = currentTweet?.fingerprint;
+    let invisibleSuffix = '';
+    if (!fp) {
+      const generated = generateFingerprint();
+      fp = generated.hex;
+      invisibleSuffix = generated.invisible;
+    } else {
+      // Reconstruct invisible characters if fingerprint was already created
+      // Wait, let's just generate the suffix from existing Hex
+      const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
+      for (let i = 0; i < fp.length; i++) {
+        const hexDigit = fp.charAt(i);
+        const binary = parseInt(hexDigit, 16).toString(2).padStart(4, '0');
+        for (let j = 0; j < binary.length; j++) {
+          invisibleSuffix += INVISIBLE_MAP[binary.charAt(j)];
+        }
+      }
+    }
+
+    tweetDraft = appendFingerprint(tweetDraft, invisibleSuffix);
+
+    // Generate Intent URL and Tracking Redirect
+    const encodedTweet = encodeURIComponent(tweetDraft);
+    const rawIntentUrl = `https://twitter.com/intent/tweet?text=${encodedTweet}`;
+    const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
+    // When defining intent URL, pass a generic username or rely on user specifying it. Since we don't know the exact username, we might prompt them, or pass 'self'. Let's default to a known env var if possible, otherwise rely on the frontend catching it.
+    // The user's prompt suggests we pass username to resolving worker. We'll use a dummy placeholder or an env var.
+    const username = process.env.X_USERNAME; // Update this to match user
+    const trackerUrl = `${baseUrl}/api/post-intent?id=${tweetId}&username=${username}&intent=${encodeURIComponent(rawIntentUrl)}`;
+
+    const approveToken = generateToken(tweetId);
+
     const updateData: any = {
       score: finalState.score || 0,
-      status: 'PENDING',
-      intent_url: intentUrl,
+      status: 'APPROVED',
+      intent_url: trackerUrl,
+      fingerprint: fp,
       versions: {
         create: {
           content: tweetDraft,
@@ -105,7 +135,7 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
       topic: updatedTweet.original_topic,
       time_of_day,
       score: updatedTweet.score,
-      intentUrl,
+      intentUrl: trackerUrl,
       editUrl: `${baseUrl}/api/view-edit?id=${tweetId}&token=${approveToken}`,
       feedbackUrl: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${approveToken}`,
       token: approveToken,
@@ -361,25 +391,25 @@ app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
   if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
 
-  const currentTweet = await prisma.tweet.findUnique({ where: { id }});
+  const currentTweet = await prisma.tweet.findUnique({ where: { id } });
   if (!currentTweet) return res.status(404).json({ error: "Tweet not found" });
 
   const newOriginal = currentTweet.edited_topic ? currentTweet.edited_topic : currentTweet.original_topic;
 
   const updatedTweet = await prisma.tweet.update({
     where: { id },
-    data: { 
+    data: {
       original_topic: newOriginal,
-      edited_topic: new_topic 
+      edited_topic: new_topic
     }
   });
 
   logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting immediate regeneration');
-  
+
   const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
   processGenerationInBackground(id, updatedTweet.time_of_day, new_topic, webhookUrl)
     .catch(err => logger.error({ err }, 'Regeneration background error'));
-    
+
   res.json({ success: true, message: "Regenerating! You'll receive a new Telegram message shortly." });
 });
 
@@ -394,18 +424,18 @@ app.post('/api/feedback', async (req, res) => {
     }
   });
 
-  const tweet = await prisma.tweet.findUnique({ 
+  const tweet = await prisma.tweet.findUnique({
     where: { id },
     include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
   });
-  
+
   logger.info({ tweet_id: id }, 'Feedback received, requesting immediate regeneration');
 
   if (tweet) {
     const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
     const topicToUse = tweet.edited_topic || tweet.original_topic;
     const oldDraft = tweet.versions[0]?.content || "";
-    
+
     processGenerationInBackground(id, tweet.time_of_day, topicToUse, webhookUrl, oldDraft, feedback)
       .catch(err => logger.error({ err }, 'Regeneration background error'));
   }
@@ -414,10 +444,33 @@ app.post('/api/feedback', async (req, res) => {
 });
 
 app.post('/api/retries/process', async (req, res) => {
-  logger.info("Processing generic retry queue (X API posting disabled)");
-  // This can be repurposed for email retries or other background tasks
-  res.json({ success: true, processed: 0 });
+  logger.info("Manual processing of retry queue requested");
+  res.json({ success: true, message: "Queue is processed by background worker automatically" });
 });
+
+app.get('/api/post-intent', async (req, res) => {
+  const { id, username, intent } = req.query;
+  if (!id || !username || !intent) {
+    return res.status(400).send("Missing parameters");
+  }
+
+  // Enqueue detection task
+  try {
+    const tweetId = String(id);
+    const user = String(username);
+
+    await enqueueRetry("RESOLVE_TWEET", { tweetId, username: user }, 1);
+    logger.info({ tweetId, username: user }, "Intercepted post intent. Queued detection polling.");
+  } catch (err: any) {
+    logger.error({ err: err.message }, "Error enqueuing resolution task");
+  }
+
+  // Redirect to real Twitter intent URL
+  res.redirect(String(intent));
+});
+
+// Start the background worker process
+runWorker();
 
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
