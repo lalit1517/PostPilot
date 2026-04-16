@@ -24,8 +24,7 @@ model Tweet {
   
   versions       TweetVersion[]
   feedbacks      Feedback[]
-  engagement     Engagement?
-  snapshots      EngagementSnapshot[]
+  engagements    Engagement[]
 }
 
 model TweetVersion {
@@ -62,17 +61,6 @@ model RetryQueue {
 }
 
 model Engagement {
-  id          String   @id @default(uuid())
-  tweet_id    String   @unique
-  likes       Int      @default(0)
-  retweets    Int      @default(0)
-  impressions Int      @default(0)
-  fetched_at  DateTime @default(now())
-  
-  tweet       Tweet    @relation(fields: [tweet_id], references: [id])
-}
-
-model EngagementSnapshot {
   id          String   @id @default(uuid())
   tweet_id    String
   likes       Int      @default(0)
