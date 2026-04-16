@@ -25,26 +25,29 @@ model Tweet {
   versions       TweetVersion[]
   feedbacks      Feedback[]
   engagements    Engagement[]
+  outcome        TweetOutcome?
 }
 
 model TweetVersion {
-  id         String   @id @default(uuid())
-  tweet_id   String
-  content    String
-  version    Int      @default(1)
-  critique   String?
-  created_at DateTime @default(now())
-  
-  tweet      Tweet    @relation(fields: [tweet_id], references: [id])
+  id            String   @id @default(uuid())
+  tweet_id      String
+  content       String
+  version       Int      @default(1)
+  critique      String?
+  quality_score Float?
+  created_at    DateTime @default(now())
+
+  tweet         Tweet    @relation(fields: [tweet_id], references: [id])
 }
 
 model Feedback {
-  id            String   @id @default(uuid())
-  tweet_id      String
-  feedback_text String
-  created_at    DateTime @default(now())
-  
-  tweet         Tweet    @relation(fields: [tweet_id], references: [id])
+  id              String   @id @default(uuid())
+  tweet_id        String
+  feedback_text   String
+  weighted_score  Float?
+  created_at      DateTime @default(now())
+
+  tweet           Tweet    @relation(fields: [tweet_id], references: [id])
 }
 
 model RetryQueue {
@@ -67,7 +70,36 @@ model Engagement {
   retweets    Int      @default(0)
   impressions Int      @default(0)
   fetched_at  DateTime @default(now())
-  
+
   tweet       Tweet    @relation(fields: [tweet_id], references: [id])
 }
 
+model TweetOutcome {
+  id             String   @id @default(cuid())
+  tweet_id       String   @unique
+  tweet          Tweet    @relation(fields: [tweet_id], references: [id], onDelete: Cascade)
+  outcome_score  Float
+  tier           String
+  peak_likes     Int
+  peak_retweets  Int
+  quality_score  Float?
+  computed_at    DateTime @default(now())
+}
+
+model PersonaProfile {
+  id               String   @id @default(cuid())
+  version          Int      @default(autoincrement())
+  profile_text     String
+  based_on_tweets  Int
+  created_at       DateTime @default(now())
+  is_active        Boolean  @default(true)
+}
+
+model LlmCallLog {
+  id         String   @id @default(cuid())
+  called_at  DateTime @default(now())
+  model      String
+  call_type  String
+
+  @@index([called_at])
+}
