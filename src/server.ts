@@ -72,22 +72,30 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     const approveToken = generateToken(tweetId);
     const baseUrl = process.env.BASE_URL || 'http://localhost:3000';
 
+    const currentTweet = await prisma.tweet.findUnique({ where: { id: tweetId }});
+    
+    const updateData: any = {
+      score: finalState.score || 0,
+      status: 'PENDING',
+      intent_url: intentUrl,
+      versions: {
+        create: {
+          content: tweetDraft,
+          version: 1,
+          critique: finalState.critique
+        }
+      }
+    };
+
+    // ONLY overwrite original_topic if it was left blank originally
+    if (currentTweet?.original_topic === "AI Generating...") {
+      updateData.original_topic = topic || finalTopic || "AI Generated";
+    }
+
     // Update the record with final results
     const updatedTweet = await prisma.tweet.update({
       where: { id: tweetId },
-      data: {
-        original_topic: topic || finalTopic || "AI Generated",
-        score: finalState.score || 0,
-        status: 'PENDING',
-        intent_url: intentUrl,
-        versions: {
-          create: {
-            content: tweetDraft,
-            version: 1,
-            critique: finalState.critique
-          }
-        }
-      }
+      data: updateData
     });
 
     const payload = {
@@ -353,9 +361,17 @@ app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
   if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
 
+  const currentTweet = await prisma.tweet.findUnique({ where: { id }});
+  if (!currentTweet) return res.status(404).json({ error: "Tweet not found" });
+
+  const newOriginal = currentTweet.edited_topic ? currentTweet.edited_topic : currentTweet.original_topic;
+
   const updatedTweet = await prisma.tweet.update({
     where: { id },
-    data: { edited_topic: new_topic }
+    data: { 
+      original_topic: newOriginal,
+      edited_topic: new_topic 
+    }
   });
 
   logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting immediate regeneration');
