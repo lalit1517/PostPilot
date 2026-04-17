@@ -5,6 +5,7 @@ import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { agentGraph } from './agent.js';
 import { generateFingerprint, appendFingerprint } from './fingerprint.js';
+import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation } from './analytics.js';
 import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
@@ -472,6 +473,40 @@ app.post('/api/feedback', async (req, res) => {
   }
 
   res.json({ success: true, message: "Feedback received! Regenerating tweet. You'll receive a new Telegram message shortly." });
+});
+
+app.get('/api/admin/engagement-pattern', async (_req, res) => {
+  try {
+    const data = await getEngagementPattern();
+    res.json({ success: true, ...data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Engagement pattern lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/topic-performance', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const data = await getTopicPerformance(limit);
+    res.json({ success: true, count: data.length, topics: data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Topic performance lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/quality-correlation', async (_req, res) => {
+  try {
+    const data = await getQualityOutcomeCorrelation();
+    res.json({ success: true, ...data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Quality correlation lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
 });
 
 app.post('/api/retries/process', async (req, res) => {
