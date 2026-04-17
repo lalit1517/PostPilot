@@ -34,7 +34,7 @@ n8n (scheduler)           Telegram (notifications)
 **Three layers:**
 
 1. **Orchestration** — n8n triggers generation at 08:00, 14:00, 20:00 UTC. Telegram delivers drafts with inline buttons (post, edit, feedback).
-2. **Intelligence** — LangGraph StateGraph with 5 nodes (contextLoader, personaAdapter, contentGenerator, qualityScorer, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
+2. **Intelligence** — LangGraph StateGraph with 6 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution).
 
 ## Self-Learning Pipeline
@@ -59,7 +59,7 @@ Generation (3 LLM calls max)
 | Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with min-max scaling vs 30-day window. Persists `topic`, `time_of_day`, `day_of_week` for analytics. Tiers: top 20% = high, bottom 30% = low. |
 | Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
 | Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
-| Draft Diversity | `src/draftDiversity.ts` | 0 | Trigram Jaccard similarity against last 10 drafts. Threshold 0.85. Log-only (does not reject). |
+| Draft Diversity | `src/draftDiversity.ts` | 0 | Trigram Jaccard similarity against last 10 drafts. Threshold 0.85. Consumed by the `diversityGate` node — triggers one re-roll on duplicate. |
 | Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Fed into `contextLoader`. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. 22h cooldown gate. |
@@ -67,21 +67,29 @@ Generation (3 LLM calls max)
 
 ## AI Agent (LangGraph)
 
-**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> qualityScorer -> [autoRefiner if score < 8] -> END`
+**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> [autoRefiner if score < 8] -> END`
+
+Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detected).
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Fetches top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, and current Trends24 topics. All queries parallel. |
-| `personaAdapter` | No | Sets tone by time of day (insightful/punchy/reflective). Prepends learned persona profile when available and passes top trending topics as a non-forcing grounding hint. |
-| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Output passed through `finalizeDraft()` to trim mid-sentence truncation. Falls back to static draft if rate-limited. |
-| `qualityScorer` | Yes | Scores 1-10 for clarity/engagement via robust `parseScore()` (regex extract, clamp 1-10, defaults to 7 on parse failure). Persists `quality_score` to TweetVersion. |
-| `autoRefiner` | Conditional | Rewrites draft if score < 8. Refined output gated by `isSuspiciousDraft()` heuristic — if rejected (empty, too short/long, no terminator, preamble leak, markdown artifacts), original draft is kept. Skipped entirely if score >= 8 (saves 1 LLM call). |
+| `contextLoader` | No | Parallel fetch: top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, Trends24 topics filtered via `OWNER_PROFILE.trendKeywords`, `computeLengthTarget()` (avg±stdev from high-tier outcomes), `computeTopicBlacklist()` (bottom-20% topics). |
+| `personaAdapter` | No | Builds `OWNER_IDENTITY` from module-level `OWNER_PROFILE` (identity, domains, moods, tones, language, experienceVoice, cities, hobbies, slangs, avoid, trendKeywords). Injects few-shot exemplars (top 3 historical tweets), hook-first rule (first 60 chars = core claim), dynamic length target, topic blacklist, tone-by-time-of-day, learned persona, trend hint, recent-topics-to-avoid, feedback guidelines. |
+| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Output passed through `finalizeDraft()`. Static fallback if rate-limited. |
+| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 10 drafts (trigram Jaccard ≥ 0.85). On duplicate, routes back to `contentGenerator` for one re-roll. Second duplicate accepted. |
+| `qualityScorer` | Yes | Scores 1-10 via `parseScore()`. Runs `parseCritiqueHints()` to convert free-form critique into a structured hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`). Persists `quality_score` to TweetVersion. |
+| `autoRefiner` | Conditional | Rewrites if score < 8. Maps `critiqueHints` to concrete rewrite directives via `HINT_DIRECTIVES` (e.g. `weak_hook` → "REWRITE THE OPENER — first 60 chars must land the core claim"). Output gated by `isSuspiciousDraft()`; rejection keeps original. Skipped at score ≥ 8. |
+
+**Owner Identity (`OWNER_PROFILE`)**: Single module-level object in `src/agent.ts`. Edit arrays (domains, moods, tones, language, hobbies, slangs, trendKeywords, avoid, cities, experienceVoice, identity) to reshape voice — trend filter and persona prompt both rebuild automatically.
 
 **Draft safety helpers** (pure computation, zero extra LLM calls):
 
-- `finalizeDraft(raw)` — trims to the last full sentence when the LLM truncates mid-thought. Replaces the old blind `.` append that masked broken output.
+- `finalizeDraft(raw)` — trims to the last full sentence when the LLM truncates mid-thought.
 - `parseScore(raw)` — extracts score from free-form LLM output. Falls back to `7` (neutral) on parse failure, never `0`.
-- `isSuspiciousDraft(draft)` — heuristic gate on refiner output. Rejects if empty, `<40` chars, `>280` chars, missing terminator, contains preamble (`"Here's"`, `"Draft:"`), or markdown artifacts.
+- `isSuspiciousDraft(draft)` — rejects empty, `<40` chars, `>280` chars, missing terminator, preamble leak, markdown artifacts.
+- `parseCritiqueHints(critique, draft, score)` — maps free-form critique → fixed hint vocabulary for `autoRefiner`.
+- `computeLengthTarget()` — derives `{min, max}` length window from last 20 high-tier `TweetOutcome` rows (avg±stdev). Returns `null` if <5 samples.
+- `computeTopicBlacklist()` — bottom-20% topics from `getTopicPerformance(50)`. Returns `[]` if <10 topic samples.
 
 **Models:** `gemini-2.5-flash` (primary, thinking disabled via `thinkingBudget: 0`) -> `gemini-3-flash-preview` -> `gemini-3.1-flash-lite-preview` (fallbacks)
 
@@ -250,11 +258,11 @@ Update `package.json`:
 
 ## Hard Constraints
 
-- **Max 3 LLM calls** per tweet generation (contentGenerator, qualityScorer, autoRefiner-conditional).
+- **Max 3 LLM calls** per tweet generation in the happy path (contentGenerator, qualityScorer, autoRefiner-conditional). Worst case 4 with a diversity re-roll (single extra `contentGenerator` call).
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 - **Google AI Studio free tier:** 5 RPM, 20 RPD — all calls rate-guarded via `src/rateGuard.ts`.
-- **All self-learning logic is pure computation** — outcomeScorer, feedbackWeighter, and scoring math use zero LLM calls.
-- **LangGraph node structure is fixed** — nodes and edges in the graph must not be rewritten.
+- **All self-learning logic is pure computation** — outcomeScorer, feedbackWeighter, analytics, diversity, length-target, and topic-blacklist math use zero LLM calls.
+- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → [autoRefiner] → END`. Re-roll edge: `diversityGate → contentGenerator` (capped at 1).
 
 ## Tech Stack
 
