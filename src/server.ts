@@ -4,7 +4,9 @@ import crypto from 'crypto';
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { agentGraph } from './agent.js';
-import { generateFingerprint, appendFingerprint } from './fingerprint.js';
+import { generateUniqueFingerprint, appendFingerprint } from './fingerprint.js';
+import { checkDraftDiversity } from './draftDiversity.js';
+import { getRateStatus } from './rateGuard.js';
 import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation } from './analytics.js';
 import { runWorker, enqueueRetry } from './worker.js';
 
@@ -70,13 +72,18 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
 
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
 
+    const diversity = await checkDraftDiversity(tweetDraft, tweetId);
+    if (diversity.duplicate) {
+      logger.warn({ tweetId, similarity: diversity.maxSimilarity, matchedTweetId: diversity.matchedTweetId }, 'Draft too similar to recent tweets');
+    }
+
     const currentTweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
 
     // Fingerprint injection
     let fp = currentTweet?.fingerprint;
     let invisibleSuffix = '';
     if (!fp) {
-      const generated = generateFingerprint();
+      const generated = await generateUniqueFingerprint();
       fp = generated.hex;
       invisibleSuffix = generated.invisible;
     } else {
@@ -473,6 +480,44 @@ app.post('/api/feedback', async (req, res) => {
   }
 
   res.json({ success: true, message: "Feedback received! Regenerating tweet. You'll receive a new Telegram message shortly." });
+});
+
+app.get('/api/admin/rate-status', async (_req, res) => {
+  try {
+    const status = await getRateStatus();
+    res.json({ success: true, ...status });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Rate status lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/failed-tasks', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const tasks = await prisma.retryQueue.findMany({
+      where: { status: 'FAILED' },
+      orderBy: { updated_at: 'desc' },
+      take: limit,
+      select: {
+        id: true,
+        task_type: true,
+        payload: true,
+        attempts: true,
+        max_retries: true,
+        last_error: true,
+        process_after: true,
+        created_at: true,
+        updated_at: true
+      }
+    });
+    res.json({ success: true, count: tasks.length, tasks });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Failed task lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
 });
 
 app.get('/api/admin/engagement-pattern', async (_req, res) => {
