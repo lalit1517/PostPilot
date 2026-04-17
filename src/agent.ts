@@ -4,6 +4,7 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import { canCallLLM, recordLLMCall } from "./rateGuard.js";
+import { getTrendingTopics } from "./trends.js";
 
 const AgentState = Annotation.Root({
   tweetId: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
@@ -12,6 +13,7 @@ const AgentState = Annotation.Root({
   context: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   recentFeedback: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   recentTopics: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
+  trendingTopics: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   learnedPersona: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   personaParameters: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   draft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
@@ -52,7 +54,7 @@ async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
 
-  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile] = await Promise.all([
+  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics] = await Promise.all([
     prisma.engagement.findMany({
       orderBy: { likes: 'desc' },
       take: 5,
@@ -75,7 +77,8 @@ async function contextLoader(state: typeof AgentState.State) {
     prisma.personaProfile.findFirst({
       where: { is_active: true },
       orderBy: { version: 'desc' }
-    })
+    }),
+    getTrendingTopics()
   ]);
 
   // Use weighted feedback if 3+ exist, otherwise fallback to unweighted
@@ -90,8 +93,8 @@ async function contextLoader(state: typeof AgentState.State) {
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
   const learnedPersona = activeProfile?.profile_text ?? "";
 
-  logger.info({ duration: `${Date.now() - start}ms`, hasPersona: !!learnedPersona }, "Finished contextLoader");
-  return { context, recentFeedback, recentTopics, learnedPersona, iterationCount: state.iterationCount || 0 };
+  logger.info({ duration: `${Date.now() - start}ms`, hasPersona: !!learnedPersona, trendCount: trendingTopics.length }, "Finished contextLoader");
+  return { context, recentFeedback, recentTopics, trendingTopics, learnedPersona, iterationCount: state.iterationCount || 0 };
 }
 
 async function personaAdapter(state: typeof AgentState.State) {
@@ -110,8 +113,12 @@ async function personaAdapter(state: typeof AgentState.State) {
 ${state.learnedPersona}\n`
     : "";
 
+  const trendingBlock = state.trendingTopics && state.trendingTopics.length > 0
+    ? `\n[TRENDING NOW — you MAY ground the post in one of these if it fits your voice; do NOT force it]:\n${state.trendingTopics.slice(0, 10).map(t => `- ${t}`).join('\n')}\n`
+    : "";
+
   const personaParameters = `You are a builder crafting content for X.
-${learnedPersonaBlock}Tone: ${toneInstruction}
+${learnedPersonaBlock}${trendingBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.

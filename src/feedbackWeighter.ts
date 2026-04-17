@@ -1,9 +1,10 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
+import { classifyFeedback, sentimentWeight } from './feedbackSentiment.js';
 
 export async function reweightFeedback(): Promise<void> {
   const feedbacks = await prisma.feedback.findMany({
-    select: { id: true, created_at: true },
+    select: { id: true, created_at: true, feedback_text: true },
   });
 
   if (feedbacks.length === 0) {
@@ -36,7 +37,10 @@ export async function reweightFeedback(): Promise<void> {
       (Date.now() - fb.created_at.getTime()) / (24 * 60 * 60_000);
     const recencyWeight = 1 / (1 + daysSinceFeedback);
 
-    const weightedScore = recencyWeight * avgOutcomeScore;
+    const { sentiment } = classifyFeedback(fb.feedback_text);
+    const sentimentMultiplier = sentimentWeight(sentiment);
+
+    const weightedScore = recencyWeight * sentimentMultiplier * avgOutcomeScore;
 
     await prisma.feedback.update({
       where: { id: fb.id },
