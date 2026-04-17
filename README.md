@@ -73,13 +73,19 @@ Generation (3 LLM calls max)
 | :--- | :--- | :--- |
 | `contextLoader` | No | Fetches top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, and current Trends24 topics. All queries parallel. |
 | `personaAdapter` | No | Sets tone by time of day (insightful/punchy/reflective). Prepends learned persona profile when available and passes top trending topics as a non-forcing grounding hint. |
-| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Falls back to static draft if rate-limited. |
-| `qualityScorer` | Yes | Scores 1-10 for clarity/engagement. Persists `quality_score` to TweetVersion. |
-| `autoRefiner` | Conditional | Rewrites draft if score < 8. Skipped entirely if score >= 8 (saves 1 LLM call). |
+| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Output passed through `finalizeDraft()` to trim mid-sentence truncation. Falls back to static draft if rate-limited. |
+| `qualityScorer` | Yes | Scores 1-10 for clarity/engagement via robust `parseScore()` (regex extract, clamp 1-10, defaults to 7 on parse failure). Persists `quality_score` to TweetVersion. |
+| `autoRefiner` | Conditional | Rewrites draft if score < 8. Refined output gated by `isSuspiciousDraft()` heuristic — if rejected (empty, too short/long, no terminator, preamble leak, markdown artifacts), original draft is kept. Skipped entirely if score >= 8 (saves 1 LLM call). |
 
-**Models:** `gemini-2.5-flash` (primary) -> `gemini-3-flash-preview` -> `gemini-3.1-flash-lite-preview` (fallbacks)
+**Draft safety helpers** (pure computation, zero extra LLM calls):
 
-**Config:** Temperature 0.7, max 500 output tokens, topP 0.9, 2-minute timeout per call.
+- `finalizeDraft(raw)` — trims to the last full sentence when the LLM truncates mid-thought. Replaces the old blind `.` append that masked broken output.
+- `parseScore(raw)` — extracts score from free-form LLM output. Falls back to `7` (neutral) on parse failure, never `0`.
+- `isSuspiciousDraft(draft)` — heuristic gate on refiner output. Rejects if empty, `<40` chars, `>280` chars, missing terminator, contains preamble (`"Here's"`, `"Draft:"`), or markdown artifacts.
+
+**Models:** `gemini-2.5-flash` (primary, thinking disabled via `thinkingBudget: 0`) -> `gemini-3-flash-preview` -> `gemini-3.1-flash-lite-preview` (fallbacks)
+
+**Config:** Temperature 0.7, max 1024 output tokens, topP 0.9, 2-minute timeout per call. Thinking is disabled on 2.5-flash so the full output budget goes to actual content (prevents mid-sentence truncation).
 
 ## Background Workers
 
