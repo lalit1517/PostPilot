@@ -70,6 +70,16 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
     select: { quality_score: true },
   });
 
+  const tweet = await prisma.tweet.findUnique({
+    where: { id: tweetId },
+    select: { original_topic: true, edited_topic: true, time_of_day: true, posted_at: true, created_at: true },
+  });
+  const topic = tweet?.edited_topic || tweet?.original_topic || null;
+  const timeOfDay = tweet?.time_of_day || null;
+  const DAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  const refDate = tweet?.posted_at ?? tweet?.created_at ?? null;
+  const dayOfWeek = refDate ? DAY_NAMES[refDate.getUTCDay()] ?? null : null;
+
   await prisma.tweetOutcome.upsert({
     where: { tweet_id: tweetId },
     create: {
@@ -79,6 +89,9 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
       peak_likes: peakLikes,
       peak_retweets: peakRetweets,
       quality_score: latestVersion?.quality_score ?? null,
+      topic,
+      time_of_day: timeOfDay,
+      day_of_week: dayOfWeek,
       computed_at: new Date(),
     },
     update: {
@@ -87,6 +100,9 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
       peak_likes: peakLikes,
       peak_retweets: peakRetweets,
       quality_score: latestVersion?.quality_score ?? null,
+      topic,
+      time_of_day: timeOfDay,
+      day_of_week: dayOfWeek,
       computed_at: new Date(),
     },
   });

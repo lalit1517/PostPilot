@@ -83,7 +83,14 @@ model TweetOutcome {
   peak_likes     Int
   peak_retweets  Int
   quality_score  Float?
+  topic          String?
+  time_of_day    String?
+  day_of_week    String?
   computed_at    DateTime @default(now())
+
+  @@index([tier, computed_at])
+  @@index([time_of_day])
+  @@index([day_of_week])
 }
 
 model PersonaProfile {
