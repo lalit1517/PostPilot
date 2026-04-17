@@ -7,6 +7,7 @@ import { agentGraph } from './agent.js';
 import { generateUniqueFingerprint, appendFingerprint } from './fingerprint.js';
 import { checkDraftDiversity } from './draftDiversity.js';
 import { getRateStatus } from './rateGuard.js';
+import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation } from './analytics.js';
 import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
@@ -515,6 +516,40 @@ app.get('/api/admin/failed-tasks', async (req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Failed task lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/engagement-pattern', async (_req, res) => {
+  try {
+    const data = await getEngagementPattern();
+    res.json({ success: true, ...data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Engagement pattern lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/topic-performance', async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const data = await getTopicPerformance(limit);
+    res.json({ success: true, count: data.length, topics: data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Topic performance lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
+app.get('/api/admin/quality-correlation', async (_req, res) => {
+  try {
+    const data = await getQualityOutcomeCorrelation();
+    res.json({ success: true, ...data });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Quality correlation lookup failed');
     res.status(500).json({ success: false, error: message });
   }
 });
