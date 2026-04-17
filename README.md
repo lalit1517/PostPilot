@@ -56,10 +56,14 @@ Generation (3 LLM calls max)
 
 | Module | File | LLM Calls | Purpose |
 | :--- | :--- | :--- | :--- |
-| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) using min-max scaling against 30-day window. Tiers: top 20% = high, bottom 30% = low. |
-| Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights user feedback by nearby tweet outcomes (+-3 day window) with recency decay: `1 / (1 + days_since)`. |
+| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with min-max scaling vs 30-day window. Persists `topic`, `time_of_day`, `day_of_week` for analytics. Tiers: top 20% = high, bottom 30% = low. |
+| Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
+| Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
+| Draft Diversity | `src/draftDiversity.ts` | 0 | Trigram Jaccard similarity against last 10 drafts. Threshold 0.85. Log-only (does not reject). |
+| Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Fed into `contextLoader`. |
+| Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. Prunes entries older than 48h. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
 
 ## AI Agent (LangGraph)
 
@@ -67,8 +71,8 @@ Generation (3 LLM calls max)
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Fetches top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile. All queries parallel. |
-| `personaAdapter` | No | Sets tone by time of day (insightful/punchy/reflective). Prepends learned persona profile when available. |
+| `contextLoader` | No | Fetches top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, and current Trends24 topics. All queries parallel. |
+| `personaAdapter` | No | Sets tone by time of day (insightful/punchy/reflective). Prepends learned persona profile when available and passes top trending topics as a non-forcing grounding hint. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Falls back to static draft if rate-limited. |
 | `qualityScorer` | Yes | Scores 1-10 for clarity/engagement. Persists `quality_score` to TweetVersion. |
 | `autoRefiner` | Conditional | Rewrites draft if score < 8. Skipped entirely if score >= 8 (saves 1 LLM call). |
@@ -86,8 +90,8 @@ The `RetryQueue` table manages three async task types processed every 10 seconds
 Detects posted tweets via invisible fingerprint matching.
 
 1. Triggered 10 minutes after user confirms posting (via Telegram button or intent link redirect).
-2. Polls Nitter RSS and Twitter timeline with browser-like headers.
-3. Matches the 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`).
+2. Polls 4 Nitter instances (`nitter.net`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`) and falls back to the native Twitter timeline with browser-like headers.
+3. Matches the 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 4. On match: marks tweet as `POSTED_CONFIRMED`, schedules first engagement fetch.
 5. On miss: one delayed retry at ~45 minutes, then marks `ERROR`.
 
@@ -132,6 +136,11 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `POST` | `/api/edit` | Update topic + trigger regeneration |
 | `POST` | `/api/feedback` | Submit feedback + trigger regeneration |
 | `POST` | `/api/telegram/webhook` | Telegram bot callback handler (posted confirmation, copy tweet) |
+| `GET` | `/api/admin/rate-status` | Current RPM/RPD consumption and remaining budget from `LlmCallLog` |
+| `GET` | `/api/admin/failed-tasks?limit=N` | Dead letter queue — inspect `RetryQueue` rows with `status = FAILED` |
+| `GET` | `/api/admin/engagement-pattern` | Aggregates `TweetOutcome` by `time_of_day`, `day_of_week`, and the time × day pivot |
+| `GET` | `/api/admin/topic-performance?limit=N` | Top-performing topics ranked by avg outcome score |
+| `GET` | `/api/admin/quality-correlation` | Pearson r between LLM `quality_score` and real `outcome_score` |
 
 **Security:** Edit/feedback URLs are signed with HMAC-SHA256 (8-char prefix). Verified via timing-safe comparison.
 
@@ -145,7 +154,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — likes, retweets, impressions at each interval |
-| `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics. One per tweet, computed at 72h. |
+| `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
 | `PersonaProfile` | Versioned persona documents with auto-increment version and `is_active` flag |
 | `LlmCallLog` | Rate limiting ledger with `called_at` index, pruned to 48h window |
 | `RetryQueue` | Task queue — RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA |
