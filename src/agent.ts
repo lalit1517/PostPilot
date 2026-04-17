@@ -28,17 +28,21 @@ const AgentState = Annotation.Root({
 // ✅ FIX 2: Increased timeout signal to 90s per call
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
-  temperature: 0.7, // Lowered significantly: limits hallucination and trailing commas
-  maxOutputTokens: 500,
+  temperature: 0.7,
+  maxOutputTokens: 1024,
   topP: 0.9,
-  maxRetries: 5, // Increased retry attempts for API latency
+  maxRetries: 5,
 };
 
-const CALL_TIMEOUT = 120_000; // 2 minutes per call - total background safety buffer
+const CALL_TIMEOUT = 120_000;
+
+// Disable Gemini 2.5 thinking so full output budget goes to actual content (prevents mid-sentence truncation)
+const THINKING_OFF = { thinkingConfig: { thinkingBudget: 0 } } as const;
 
 export const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
-  model: "gemini-2.5-flash", // Stable, reliable, and handles tight constraints without trimming
+  model: "gemini-2.5-flash",
+  ...THINKING_OFF,
 }).withFallbacks([
   new ChatGoogleGenerativeAI({
     ...baseConfig,
@@ -49,6 +53,51 @@ export const llm = new ChatGoogleGenerativeAI({
     model: "gemini-3.1-flash-lite-preview",
   }),
 ]);
+
+// Trim a possibly-truncated LLM draft to the last full sentence.
+// Drops dangling fragments like "If everyone is" to prevent fake-period masking.
+function finalizeDraft(raw: string): string {
+  let s = (raw ?? "").trim();
+  if (!s) return "";
+
+  // Already ends clean
+  if (/[.!?]["')\]]?$/.test(s)) return s;
+
+  // Walk back to the last sentence terminator
+  const match = s.match(/^(.*[.!?])["')\]]?\s*\S*$/s);
+  if (match && match[1]) {
+    const trimmed = match[1].trim();
+    // Only accept the trim if it keeps enough content (>=40 chars). Otherwise the whole reply is one broken sentence.
+    if (trimmed.length >= 40) return trimmed;
+  }
+
+  // No terminator anywhere and draft is short → append a period rather than return empty
+  return s + ".";
+}
+
+// Heuristic: detect broken/suspicious draft output. Returns reason string when suspicious, null when OK.
+// Catches truncation, garbage, and length pathologies without needing an LLM rescore.
+function isSuspiciousDraft(draft: string): string | null {
+  const s = (draft ?? "").trim();
+  if (!s) return "empty";
+  if (s.length < 40) return `too_short(${s.length})`;
+  if (s.length > 280) return `too_long(${s.length})`;
+  if (!/[.!?]["')\]]?$/.test(s)) return "no_terminator";
+  // Reject obvious preamble leaks
+  if (/^(here'?s|here is|draft:|tweet:|topic:)/i.test(s)) return "preamble_leak";
+  // Reject markdown artifacts
+  if (/[*_`#]/.test(s)) return "markdown_artifact";
+  return null;
+}
+
+// Extract numeric score robustly from free-form LLM output. Defaults to 7 (neutral) on parse failure, never 0.
+function parseScore(raw: string): number {
+  const match = (raw ?? "").match(/\d+(\.\d+)?/);
+  if (!match) return 7;
+  const n = parseFloat(match[0]);
+  if (!Number.isFinite(n)) return 7;
+  return Math.max(1, Math.min(10, n));
+}
 
 async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
@@ -172,9 +221,7 @@ Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
       draft = parts.slice(1).join('|').trim();
     }
 
-    if (draft && !draft.match(/[.!?]$/)) {
-      draft += ".";
-    }
+    draft = finalizeDraft(draft);
 
     logger.info({ topic, draftLength: draft.length, duration: `${Date.now() - start}ms` }, "Parsed AI Generation");
     return { topic, draft, iterationCount: 1 };
@@ -203,9 +250,10 @@ async function qualityScorer(state: typeof AgentState.State) {
     } else {
       await recordLLMCall("gemini-2.5-flash", "score");
       const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-      const parts = (res.content as string).split('|');
-      score = parseFloat(parts[0] || '0') || 0;
-      critique = parts[1] || '';
+      const raw = (res.content as string).trim();
+      const parts = raw.split('|');
+      score = parseScore(parts[0] ?? raw);
+      critique = (parts[1] ?? '').trim();
     }
   } catch (err) {
     logger.warn("Quality Scorer timed out. Proceeding with default score.");
@@ -246,9 +294,14 @@ async function autoRefiner(state: typeof AgentState.State) {
     await recordLLMCall("gemini-2.5-flash", "refine");
 
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-    let draft = (res.content as string).trim();
-    if (draft && !draft.match(/[.!?]$/)) draft += ".";
-    return { draft, iterationCount: 2 };
+    const refined = finalizeDraft((res.content as string).trim());
+    const rejectReason = isSuspiciousDraft(refined);
+    if (rejectReason) {
+      logger.warn({ rejectReason, refinedLen: refined.length, originalLen: state.draft.length }, "Refined draft rejected by heuristic. Keeping original.");
+      return { draft: state.draft, iterationCount: 2 };
+    }
+    logger.info({ refinedLen: refined.length }, "Refined draft accepted");
+    return { draft: refined, iterationCount: 2 };
   } catch (err) {
     logger.warn("Auto Refiner timed out. Using original draft.");
     return { draft: state.draft, iterationCount: 2 };
