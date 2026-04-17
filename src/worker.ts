@@ -81,8 +81,15 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
   }
 }
 
+const NITTER_INSTANCES = [
+  'nitter.net',
+  'nitter.privacydev.net',
+  'nitter.poast.org',
+  'nitter.space'
+];
+
 async function pollTimelineForFingerprint(username: string, fp: string): Promise<{ tweetId: string, url: string } | null> {
-  const headers = { 
+  const headers = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/json',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -90,7 +97,7 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
   };
 
   const sources = [
-    { name: 'Nitter RSS', url: `https://nitter.net/${username}/rss` },
+    ...NITTER_INSTANCES.map(host => ({ name: `Nitter RSS (${host})`, url: `https://${host}/${username}/rss` })),
     { name: 'Twitter Native', url: `https://twitter.com/${username}` }
   ];
 
