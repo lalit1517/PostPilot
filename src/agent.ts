@@ -5,6 +5,8 @@ import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import { canCallLLM, recordLLMCall } from "./rateGuard.js";
 import { getTrendingTopics } from "./trends.js";
+import { checkDraftDiversity } from "./draftDiversity.js";
+import { getTopicPerformance } from "./analytics.js";
 
 const AgentState = Annotation.Root({
   tweetId: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
@@ -19,9 +21,13 @@ const AgentState = Annotation.Root({
   draft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   score: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
   critique: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
+  critiqueHints: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   previousDraft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   currentFeedback: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   iterationCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
+  lengthTarget: Annotation<{ min: number; max: number } | null>({ reducer: (x, y) => y ?? x, default: () => null }),
+  topicBlacklist: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
+  rerollCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
 });
 
 // ✅ FIX 1: Temperature lowered to 1.3 (safe, still creative)
@@ -35,6 +41,66 @@ const baseConfig = {
 };
 
 const CALL_TIMEOUT = 120_000;
+
+const OWNER_PROFILE = {
+  identity: "Lalit Kumar, 23-year-old FullStack AI Engineer, 2 years of real shipping experience. GenZ dev. Not a tutorial guy.",
+  domains: [
+    "AI/LLM — agents, LangGraph, RAG, prompt engineering, Gemini, OpenAI, Anthropic",
+    "Frontend — React, Next.js, TypeScript, Tailwind, UI/UX, component design",
+    "FullStack — Node.js, APIs, Prisma, Supabase, PostgreSQL, system design",
+    "Dev culture — shipping, indie hacking, build-in-public, side projects, developer productivity",
+    "Sarcasm/humor — tech hype, over-engineering, tutorial hell, AI bros, imposter syndrome, bad code reviews",
+  ],
+  moods: [
+    "curious and caffeinated",
+    "frustrated-but-still-shipping",
+    "late-night-coder energy",
+    "quietly proud after a bug fix",
+    "mildly unhinged about a new AI tool",
+    "done with hype, just building",
+  ],
+  tones: [
+    "punchy and direct",
+    "dry humor with a straight face",
+    "self-aware and slightly self-deprecating",
+    "opinionated but not arrogant",
+    "GenZ brevity — says a lot in few words",
+  ],
+  language: [
+    "Plain English by default",
+    "Occasional Hinglish for humor or relatability (e.g. 'bhai', 'yaar', 'arre yaar', 'kya kar raha hai')",
+    "No jargon without payoff — earn the technical term",
+    "Short sentences. No filler. No corporate speak.",
+  ],
+  experienceVoice: "2 years in, knows enough to be dangerous. Has opinions. Has scars from prod bugs. Not pretending to be a 10x guru.",
+  cities: ["Jaipur", "Bangalore", "Delhi"],
+  hobbies: [
+    "building side projects at 2am",
+    "trying every new AI tool that drops",
+    "chai",
+    "doom-scrolling dev Twitter then building something inspired by it",
+    "debugging things that 'should just work'",
+  ],
+  slangs: [
+    "hehe", "lol", "lmao", "ngl", "tbh", "fr fr", "no cap", "bro", "bhai",
+    "yaar", "arre", "bruh", "deadass", "lowkey", "highkey", "based", "W", "L",
+    "it's giving", "not gonna lie", "the audacity",
+  ],
+  avoid: [
+    "politics", "sports", "entertainment gossip", "finance/crypto hype",
+    "motivational fluff without substance", "topics unrelated to tech/AI/dev",
+  ],
+  trendKeywords: [
+    "ai", "llm", "gpt", "claude", "gemini", "openai", "anthropic", "machine learning", "ml",
+    "react", "nextjs", "typescript", "javascript", "frontend", "tailwind", "css", "ui", "ux",
+    "fullstack", "full stack", "web dev", "developer", "programming", "coding", "software", "engineer",
+    "node", "api", "backend", "database", "prisma", "supabase", "postgres",
+    "startup", "saas", "product", "indie hacker", "build in public", "ship", "side project",
+    "tech", "devtools", "open source", "github", "cursor", "vscode",
+    "jaipur", "bangalore", "delhi",
+    "chai", "debugging", "2am", "imposter syndrome", "tutorial hell",
+  ],
+};
 
 // Disable Gemini 2.5 thinking so full output budget goes to actual content (prevents mid-sentence truncation)
 const THINKING_OFF = { thinkingConfig: { thinkingBudget: 0 } } as const;
@@ -99,11 +165,92 @@ function parseScore(raw: string): number {
   return Math.max(1, Math.min(10, n));
 }
 
+// Parse free-form critique text into discrete actionable hints for autoRefiner.
+// Maps common critique patterns to a fixed hint vocabulary.
+function parseCritiqueHints(critique: string, draft: string, score: number): string[] {
+  const hints: string[] = [];
+  const c = (critique ?? "").toLowerCase();
+  const d = (draft ?? "").trim();
+
+  // Length-based hints (derived from the draft itself, not just critique text)
+  if (d.length > 260) hints.push("too_long");
+  if (d.length < 80) hints.push("too_short");
+
+  // Critique-text pattern matching
+  if (/\b(hook|opener|opening|first line|grab)\b/.test(c)) hints.push("weak_hook");
+  if (/\b(vague|generic|bland|unclear|ambiguous|specific)\b/.test(c)) hints.push("vague_claim");
+  if (/\b(boring|dull|flat|unengaging|dry|no voice)\b/.test(c)) hints.push("low_energy");
+  if (/\b(cliche|cliché|trite|overused|tired|been said)\b/.test(c)) hints.push("cliche");
+  if (/\b(jargon|technical|complex|simpler|simplify)\b/.test(c)) hints.push("too_jargon");
+  if (/\b(ending|conclusion|closing|final|ends)\b/.test(c)) hints.push("weak_ending");
+  if (/\b(structure|flow|awkward|choppy|disjointed)\b/.test(c)) hints.push("poor_flow");
+  if (/\b(emotion|feel|personal|relate|human)\b/.test(c)) hints.push("needs_emotion");
+
+  // Score-based fallback hints when critique is empty/unhelpful
+  if (hints.length === 0 && score < 7) hints.push("low_quality");
+
+  return hints;
+}
+
+// Compute sweet-spot length range from top-tier TweetOutcome records.
+// Returns null if not enough data (<5 high-tier outcomes).
+async function computeLengthTarget(): Promise<{ min: number; max: number } | null> {
+  try {
+    const highTier = await prisma.tweetOutcome.findMany({
+      where: { tier: "high" },
+      select: { tweet_id: true },
+      orderBy: { computed_at: "desc" },
+      take: 20,
+    });
+    if (highTier.length < 5) return null;
+
+    const tweetIds = highTier.map(o => o.tweet_id);
+    const versions = await prisma.tweetVersion.findMany({
+      where: { tweet_id: { in: tweetIds } },
+      select: { tweet_id: true, content: true, version: true },
+      orderBy: { version: "desc" },
+    });
+
+    // Keep only the latest version per tweet
+    const seen = new Set<string>();
+    const lengths: number[] = [];
+    for (const v of versions) {
+      if (seen.has(v.tweet_id)) continue;
+      seen.add(v.tweet_id);
+      lengths.push(v.content.length);
+    }
+    if (lengths.length < 5) return null;
+
+    const avg = lengths.reduce((a, b) => a + b, 0) / lengths.length;
+    const variance = lengths.reduce((s, l) => s + (l - avg) ** 2, 0) / lengths.length;
+    const stdev = Math.sqrt(variance);
+    const min = Math.max(60, Math.floor(avg - stdev));
+    const max = Math.min(280, Math.ceil(avg + stdev));
+    return { min, max };
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "computeLengthTarget failed");
+    return null;
+  }
+}
+
+// Fetch bottom-20% topics by avg_outcome_score for AVOID list.
+async function computeTopicBlacklist(): Promise<string[]> {
+  try {
+    const topics = await getTopicPerformance(50);
+    if (topics.length < 10) return [];
+    const bottomSize = Math.max(1, Math.floor(topics.length * 0.2));
+    return topics.slice(-bottomSize).map(t => t.topic);
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, "computeTopicBlacklist failed");
+    return [];
+  }
+}
+
 async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
 
-  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics] = await Promise.all([
+  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics, lengthTarget, topicBlacklist] = await Promise.all([
     prisma.engagement.findMany({
       orderBy: { likes: 'desc' },
       take: 5,
@@ -127,7 +274,9 @@ async function contextLoader(state: typeof AgentState.State) {
       where: { is_active: true },
       orderBy: { version: 'desc' }
     }),
-    getTrendingTopics()
+    getTrendingTopics(),
+    computeLengthTarget(),
+    computeTopicBlacklist(),
   ]);
 
   // Use weighted feedback if 3+ exist, otherwise fallback to unweighted
@@ -142,8 +291,30 @@ async function contextLoader(state: typeof AgentState.State) {
   const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
   const learnedPersona = activeProfile?.profile_text ?? "";
 
-  logger.info({ duration: `${Date.now() - start}ms`, hasPersona: !!learnedPersona, trendCount: trendingTopics.length }, "Finished contextLoader");
-  return { context, recentFeedback, recentTopics, trendingTopics, learnedPersona, iterationCount: state.iterationCount || 0 };
+  const filteredTrends = trendingTopics.filter(t =>
+    OWNER_PROFILE.trendKeywords.some(kw => t.toLowerCase().includes(kw))
+  );
+  const relevantTrends = filteredTrends.length > 0 ? filteredTrends.slice(0, 10) : trendingTopics.slice(0, 5);
+
+  logger.info({
+    duration: `${Date.now() - start}ms`,
+    hasPersona: !!learnedPersona,
+    trendCount: trendingTopics.length,
+    relevantTrendCount: relevantTrends.length,
+    lengthTarget,
+    blacklistCount: topicBlacklist.length,
+    contextCount: context.length,
+  }, "Finished contextLoader");
+  return {
+    context,
+    recentFeedback,
+    recentTopics,
+    trendingTopics: relevantTrends,
+    learnedPersona,
+    lengthTarget,
+    topicBlacklist,
+    iterationCount: state.iterationCount || 0,
+  };
 }
 
 async function personaAdapter(state: typeof AgentState.State) {
@@ -166,9 +337,51 @@ ${state.learnedPersona}\n`
     ? `\n[TRENDING NOW — you MAY ground the post in one of these if it fits your voice; do NOT force it]:\n${state.trendingTopics.slice(0, 10).map(t => `- ${t}`).join('\n')}\n`
     : "";
 
-  const personaParameters = `You are a builder crafting content for X.
-${learnedPersonaBlock}${trendingBlock}Tone: ${toneInstruction}
+  // Few-shot exemplars: top historical tweets as style anchors (not topic anchors)
+  const exemplarsBlock = state.context && state.context.length > 0
+    ? `\n[STYLE EXEMPLARS — your best-performing historical tweets. Match this VOICE and RHYTHM, not the topic]:\n${state.context.slice(0, 3).map((c, i) => `Example ${i + 1}: ${c}`).join('\n')}\n`
+    : "";
+
+  // Dynamic length target from high-tier outcomes
+  const lengthBlock = state.lengthTarget
+    ? `\n[LENGTH TARGET — your top-performing tweets cluster here]: ${state.lengthTarget.min}-${state.lengthTarget.max} characters. Aim for this range.\n`
+    : "";
+
+  // Data-driven topic blacklist from bottom-20% performers
+  const blacklistBlock = state.topicBlacklist && state.topicBlacklist.length > 0
+    ? `\n[POOR-PERFORMING TOPICS — AVOID these, historical data shows they flop]:\n${state.topicBlacklist.map(t => `- ${t}`).join('\n')}\n`
+    : "";
+
+  const OWNER_IDENTITY = `You are ${OWNER_PROFILE.identity}
+
+DOMAINS (only write about these):
+${OWNER_PROFILE.domains.map(d => `- ${d}`).join('\n')}
+
+MOODS (pick one that fits the tone/time):
+${OWNER_PROFILE.moods.map(m => `- ${m}`).join('\n')}
+
+VOICE & TONE:
+${OWNER_PROFILE.tones.map(t => `- ${t}`).join('\n')}
+
+LANGUAGE STYLE:
+${OWNER_PROFILE.language.map(l => `- ${l}`).join('\n')}
+
+EXPERIENCE VOICE: ${OWNER_PROFILE.experienceVoice}
+
+CITIES YOU VIBE WITH: ${OWNER_PROFILE.cities.join(', ')}
+
+HOBBIES/PERSONALITY:
+${OWNER_PROFILE.hobbies.map(h => `- ${h}`).join('\n')}
+
+SLANGS (use sparingly, only when it fits naturally — 1 per tweet max):
+${OWNER_PROFILE.slangs.join(', ')}
+
+NEVER write about: ${OWNER_PROFILE.avoid.join(', ')}.`;
+
+  const personaParameters = `${OWNER_IDENTITY}
+${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${lengthBlock}${blacklistBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
+HOOK RULE: The first 60 characters MUST carry the core claim, punchline, or hook. Never waste the opener on setup or throat-clearing.
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
 NEVER end mid-sentence. Every response MUST be a complete thought with a closing period.
@@ -236,6 +449,34 @@ Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
   }
 }
 
+// Diversity gate: reject near-duplicate drafts (trigram Jaccard >= 0.85) and trigger one re-roll.
+// Budget: worst case +1 LLM call only when duplicate is detected AND rerollCount === 0.
+async function diversityGate(state: typeof AgentState.State) {
+  const result = await checkDraftDiversity(state.draft, state.tweetId);
+  if (!result.duplicate) {
+    logger.info({ maxSimilarity: result.maxSimilarity }, "Draft passed diversity gate");
+    return { rerollCount: state.rerollCount ?? 0 };
+  }
+
+  // Already re-rolled once — accept and move on to avoid infinite loop
+  if ((state.rerollCount ?? 0) >= 1) {
+    logger.warn({ maxSimilarity: result.maxSimilarity, matchedTweetId: result.matchedTweetId }, "Draft still near-duplicate after re-roll. Accepting.");
+    return { rerollCount: state.rerollCount };
+  }
+
+  logger.warn({ maxSimilarity: result.maxSimilarity, matchedTweetId: result.matchedTweetId }, "Draft near-duplicate. Triggering re-roll.");
+  return { rerollCount: (state.rerollCount ?? 0) + 1 };
+}
+
+// Router: send duplicates (when rerollCount just incremented to 1) back to contentGenerator.
+function afterDiversityGate(state: typeof AgentState.State): "contentGenerator" | "qualityScorer" {
+  // Re-roll path is taken exactly once — when rerollCount === 1 and we haven't scored yet (score === 0)
+  if ((state.rerollCount ?? 0) === 1 && (state.score ?? 0) === 0) {
+    return "contentGenerator";
+  }
+  return "qualityScorer";
+}
+
 async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
   const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
@@ -259,6 +500,9 @@ async function qualityScorer(state: typeof AgentState.State) {
     logger.warn("Quality Scorer timed out. Proceeding with default score.");
   }
 
+  const critiqueHints = parseCritiqueHints(critique, state.draft, score);
+  logger.info({ score, critiqueHints }, "Parsed critique hints");
+
   // Persist quality_score to TweetVersion
   if (state.tweetId) {
     try {
@@ -278,12 +522,36 @@ async function qualityScorer(state: typeof AgentState.State) {
     }
   }
 
-  return { score, critique };
+  return { score, critique, critiqueHints };
 }
 
 async function autoRefiner(state: typeof AgentState.State) {
-  logger.info({ score: state.score }, "Running autoRefiner (LLM Call 3)");
-  const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}\n\nSTRICT: Ensure the new version is a full, finished tweet that ends with a period. No incomplete sentences. No intro text. Just the tweet.`;
+  logger.info({ score: state.score, hints: state.critiqueHints }, "Running autoRefiner (LLM Call 3)");
+
+  // Map structured hints to concrete rewrite directives
+  const HINT_DIRECTIVES: Record<string, string> = {
+    too_long: "SHORTEN — cut filler words, tighten every sentence.",
+    too_short: "EXPAND — add one concrete detail or example.",
+    weak_hook: "REWRITE THE OPENER — first 60 chars must land the core claim or punchline immediately.",
+    vague_claim: "ADD SPECIFICITY — replace generic phrases with concrete names, numbers, or examples.",
+    low_energy: "INJECT VOICE — add a sharper opinion, dry humor, or a GenZ slang if it fits.",
+    cliche: "DE-CLICHE — strip any 'game changer', 'paradigm shift', 'at the end of the day' phrasing.",
+    too_jargon: "SIMPLIFY — replace jargon with plain-English equivalent.",
+    weak_ending: "STRENGTHEN THE CLOSE — end on a punchline, callback, or sharp assertion. No trailing fluff.",
+    poor_flow: "SMOOTH THE FLOW — rewrite for one continuous thought, cut awkward transitions.",
+    needs_emotion: "ADD HUMAN TEXTURE — make it feel like a real person typed it, not a corporate draft.",
+    low_quality: "FULL REWRITE — keep the topic, rebuild from scratch with a stronger angle.",
+  };
+
+  const directives = (state.critiqueHints ?? [])
+    .map(h => HINT_DIRECTIVES[h])
+    .filter(Boolean);
+
+  const hintsBlock = directives.length > 0
+    ? `\n\nSTRUCTURED REFINEMENT HINTS (apply every one):\n${directives.map(d => `- ${d}`).join('\n')}\n`
+    : "";
+
+  const prompt = `${state.personaParameters}\n\nYour previous draft was scored ${state.score}/10 with this critique: "${state.critique}".${hintsBlock}\nRewrite it to be significantly better while keeping it plain text.\nOriginal: ${state.draft}\n\nSTRICT: Ensure the new version is a full, finished tweet that ends with a period. No incomplete sentences. No intro text. Just the tweet.`;
 
   try {
     const { allowed, reason } = await canCallLLM();
@@ -321,14 +589,16 @@ const workflow = new StateGraph(AgentState)
   .addNode("contextLoader", contextLoader)
   .addNode("personaAdapter", personaAdapter)
   .addNode("contentGenerator", contentGenerator)
+  .addNode("diversityGate", diversityGate)
   .addNode("qualityScorer", qualityScorer)
   .addNode("autoRefiner", autoRefiner)
 
   .addEdge(START, "contextLoader")
   .addEdge("contextLoader", "personaAdapter")
   .addEdge("personaAdapter", "contentGenerator")
-  .addEdge("contentGenerator", "qualityScorer")
-  .addConditionalEdges("qualityScorer", shouldRefine) // ✅ Conditional skip
+  .addEdge("contentGenerator", "diversityGate")
+  .addConditionalEdges("diversityGate", afterDiversityGate)
+  .addConditionalEdges("qualityScorer", shouldRefine)
   .addEdge("autoRefiner", END);
 
 export const agentGraph = workflow.compile();
