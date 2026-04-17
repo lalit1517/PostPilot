@@ -251,6 +251,148 @@ app.get('/api/analytics', async (req, res) => {
   });
 });
 
+app.get('/api/status/:id/timeline', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ success: false, error: "Missing ID" });
+
+    const tweet = await prisma.tweet.findUnique({
+      where: { id },
+      include: {
+        versions: { orderBy: { version: 'asc' } },
+        feedbacks: { orderBy: { created_at: 'asc' } },
+        engagements: { orderBy: { fetched_at: 'asc' } },
+        outcome: true
+      }
+    });
+
+    if (!tweet) return res.status(404).json({ success: false, error: "Tweet not found" });
+
+    const tasks = await prisma.$queryRaw<Array<{
+      id: string;
+      task_type: string;
+      status: string;
+      attempts: number;
+      max_retries: number;
+      last_error: string | null;
+      process_after: Date;
+      created_at: Date;
+      updated_at: Date;
+    }>>`
+      SELECT id, task_type, status, attempts, max_retries, last_error, process_after, created_at, updated_at
+      FROM "RetryQueue"
+      WHERE payload->>'tweetId' = ${id}
+      ORDER BY created_at ASC
+    `;
+
+    const events: Array<{ kind: string; at: Date; detail: Record<string, unknown> }> = [];
+
+    events.push({
+      kind: 'CREATED',
+      at: tweet.created_at,
+      detail: { status: 'GENERATING', topic: tweet.original_topic, time_of_day: tweet.time_of_day }
+    });
+
+    for (const v of tweet.versions) {
+      events.push({
+        kind: 'VERSION',
+        at: v.created_at,
+        detail: { version: v.version, quality_score: v.quality_score, critique: v.critique, length: v.content.length }
+      });
+    }
+
+    for (const f of tweet.feedbacks) {
+      events.push({
+        kind: 'FEEDBACK',
+        at: f.created_at,
+        detail: { weighted_score: f.weighted_score, text: f.feedback_text }
+      });
+    }
+
+    if (tweet.posted_at) {
+      events.push({
+        kind: 'POSTED',
+        at: tweet.posted_at,
+        detail: { x_tweet_id: tweet.x_tweet_id, live_url: tweet.live_url }
+      });
+    }
+
+    for (const e of tweet.engagements) {
+      events.push({
+        kind: 'ENGAGEMENT',
+        at: e.fetched_at,
+        detail: { likes: e.likes, retweets: e.retweets, impressions: e.impressions }
+      });
+    }
+
+    if (tweet.outcome) {
+      events.push({
+        kind: 'OUTCOME',
+        at: tweet.outcome.computed_at,
+        detail: {
+          outcome_score: tweet.outcome.outcome_score,
+          tier: tweet.outcome.tier,
+          peak_likes: tweet.outcome.peak_likes,
+          peak_retweets: tweet.outcome.peak_retweets,
+          quality_score: tweet.outcome.quality_score,
+          topic: tweet.outcome.topic,
+          time_of_day: tweet.outcome.time_of_day,
+          day_of_week: tweet.outcome.day_of_week
+        }
+      });
+    }
+
+    for (const t of tasks) {
+      events.push({
+        kind: 'TASK',
+        at: t.updated_at,
+        detail: {
+          task_id: t.id,
+          task_type: t.task_type,
+          status: t.status,
+          attempts: t.attempts,
+          max_retries: t.max_retries,
+          last_error: t.last_error,
+          process_after: t.process_after
+        }
+      });
+    }
+
+    events.sort((a, b) => a.at.getTime() - b.at.getTime());
+
+    res.setHeader('Cache-Control', 'private, max-age=5');
+    res.json({
+      success: true,
+      tweet: {
+        id: tweet.id,
+        status: tweet.status,
+        original_topic: tweet.original_topic,
+        edited_topic: tweet.edited_topic,
+        time_of_day: tweet.time_of_day,
+        score: tweet.score,
+        posted: tweet.posted,
+        posted_at: tweet.posted_at,
+        x_tweet_id: tweet.x_tweet_id,
+        live_url: tweet.live_url,
+        fingerprint: tweet.fingerprint,
+        created_at: tweet.created_at
+      },
+      counts: {
+        versions: tweet.versions.length,
+        feedbacks: tweet.feedbacks.length,
+        engagements: tweet.engagements.length,
+        tasks: tasks.length
+      },
+      outcome: tweet.outcome,
+      timeline: events
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Timeline lookup failed');
+    res.status(500).json({ success: false, error: message });
+  }
+});
+
 // HTML UI for Topic Editing
 app.get('/api/view-edit', (req, res) => {
   const { id, token } = req.query;
