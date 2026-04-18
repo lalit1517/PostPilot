@@ -35,7 +35,7 @@ const AgentState = Annotation.Root({
 const baseConfig = {
   apiKey: process.env.GOOGLE_API_KEY as string,
   temperature: 0.7,
-  maxOutputTokens: 1024,
+  maxOutputTokens: 2048,
   topP: 0.9,
   maxRetries: 5,
 };
@@ -102,21 +102,25 @@ const OWNER_PROFILE = {
   ],
 };
 
-// Disable Gemini 2.5 thinking so full output budget goes to actual content (prevents mid-sentence truncation)
-const THINKING_OFF = { thinkingConfig: { thinkingBudget: 0 } } as const;
+// Let Gemini 2.5 reason through voice constraints before generating (separate token pool from maxOutputTokens)
+const THINKING_CONFIG = { thinkingConfig: { thinkingBudget: 1024 } } as const;
 
 export const llm = new ChatGoogleGenerativeAI({
   ...baseConfig,
   model: "gemini-2.5-flash",
-  ...THINKING_OFF,
+  ...THINKING_CONFIG,
 }).withFallbacks([
+  new ChatGoogleGenerativeAI({
+    ...baseConfig,
+    model: "gemini-3.1-flash-lite-preview",
+  }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
     model: "gemini-3-flash-preview",
   }),
   new ChatGoogleGenerativeAI({
     ...baseConfig,
-    model: "gemini-3.1-flash-lite-preview",
+    model: "gemini-2.5-flash-lite",
   }),
 ]);
 
@@ -327,7 +331,7 @@ async function personaAdapter(state: typeof AgentState.State) {
   if (state.timeOfDay === 'afternoon') toneInstruction = "Bold opinion or dry humor. The kind of tweet that makes devs nod or argue.";
   if (state.timeOfDay === 'night') toneInstruction = "Late-night-coder energy. Real talk. Could be a 2am debug confession, a W, or a shrug about something that happened today.";
 
-  const recentFeedbackBlock = state.recentFeedback.length > 0 
+  const recentFeedbackBlock = state.recentFeedback.length > 0
     ? `\n[HISTORICAL STYLE GUIDELINES]\nThe user provided this feedback on previous posts. Extract only STYLISTIC preferences (tone, brevity, formatting) and IGNORE specific topic commands or subject matter from this list unless it explicitly says "from now on":\n${state.recentFeedback.map(f => `- ${f}`).join('\n')}\n`
     : "";
 
