@@ -91,9 +91,9 @@ Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detec
 - `computeLengthTarget()` — derives `{min, max}` length window from last 20 high-tier `TweetOutcome` rows (avg±stdev). Returns `null` if <5 samples.
 - `computeTopicBlacklist()` — bottom-20% topics from `getTopicPerformance(50)`. Returns `[]` if <10 topic samples.
 
-**Models:** `gemini-2.5-flash` (primary, thinking disabled via `thinkingBudget: 0`) -> `gemini-3-flash-preview` -> `gemini-3.1-flash-lite-preview` (fallbacks)
+**Models:** `gemini-2.5-flash` (primary, `thinkingBudget: 1024`) -> `gemini-3.1-flash-lite-preview` -> `gemini-3-flash-preview` -> `gemini-2.5-flash-lite` (fallbacks)
 
-**Config:** Temperature 0.7, max 1024 output tokens, topP 0.9, 2-minute timeout per call. Thinking is disabled on 2.5-flash so the full output budget goes to actual content (prevents mid-sentence truncation).
+**Config:** Temperature 0.7, max 2048 output tokens, topP 0.9, 2-minute timeout per call.
 
 ## Background Workers
 
