@@ -66,6 +66,12 @@ ${highTierTweets.map((t, i) => `${i + 1}. [Score: ${t.outcome.outcome_score.toFi
 TASK: Produce an updated persona profile document for a builder on X.
 Extract: (1) sentence structures that recur in top posts, (2) vocabulary patterns, (3) topic angles that performed well, (4) what to avoid based on low performers.
 
+CRITICAL VOICE CONSTRAINT: The persona profile MUST sound like a GenZ Indian dev who tweets casually.
+If you notice the top posts using formal/literary language, DO NOT copy that pattern — flag it under AVOID instead.
+The SIGNATURE_PHRASES section must only contain phrases a real 23-year-old would say, not a novelist.
+Never include words like "indeed", "thus", "upon", "whilst", "amidst", "behold", "henceforth" in the profile.
+No metaphors about journeys, battles, or nature. No philosophical framing.
+
 Output ONLY the persona document. Plain text. Under 400 words. No preamble.
 Structure it with these exact section headers on their own lines:
 TONE:
