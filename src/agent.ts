@@ -186,6 +186,9 @@ function parseCritiqueHints(critique: string, draft: string, score: number): str
   if (/\b(structure|flow|awkward|choppy|disjointed)\b/.test(c)) hints.push("poor_flow");
   if (/\b(emotion|feel|personal|relate|human)\b/.test(c)) hints.push("needs_emotion");
 
+  // Voice violation detection — catches literary/philosophical/Shakespearean output
+  if (/\b(formal|literary|philosophical|eloquent|profound|poetic|metaphor|shakespear|grandiose|flowery|verbose)\b/.test(c)) hints.push("wrong_voice");
+
   // Score-based fallback hints when critique is empty/unhelpful
   if (hints.length === 0 && score < 7) hints.push("low_quality");
 
@@ -319,10 +322,10 @@ async function contextLoader(state: typeof AgentState.State) {
 
 async function personaAdapter(state: typeof AgentState.State) {
   logger.info("Running personaAdapter");
-  let toneInstruction = "Be insightful.";
-  if (state.timeOfDay === 'morning') toneInstruction = "Create content that delivers a deep, valuable insight. Be intellectual but concise.";
-  if (state.timeOfDay === 'afternoon') toneInstruction = "Make the content bold, punchy, or a strong hot take to spark conversation.";
-  if (state.timeOfDay === 'night') toneInstruction = "Adopt a personal, reflective, or storytelling tone suitable for winding down the day.";
+  let toneInstruction = "Write like a dev who just opened Twitter between tasks.";
+  if (state.timeOfDay === 'morning') toneInstruction = "Ship a hot take or a dev observation. Punchy. Direct. Like a guy who just opened his laptop with chai.";
+  if (state.timeOfDay === 'afternoon') toneInstruction = "Bold opinion or dry humor. The kind of tweet that makes devs nod or argue.";
+  if (state.timeOfDay === 'night') toneInstruction = "Late-night-coder energy. Real talk. Could be a 2am debug confession, a W, or a shrug about something that happened today.";
 
   const recentFeedbackBlock = state.recentFeedback.length > 0 
     ? `\n[HISTORICAL STYLE GUIDELINES]\nThe user provided this feedback on previous posts. Extract only STYLISTIC preferences (tone, brevity, formatting) and IGNORE specific topic commands or subject matter from this list unless it explicitly says "from now on":\n${state.recentFeedback.map(f => `- ${f}`).join('\n')}\n`
@@ -382,6 +385,15 @@ NEVER write about: ${OWNER_PROFILE.avoid.join(', ')}.`;
 ${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${lengthBlock}${blacklistBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 HOOK RULE: The first 60 characters MUST carry the core claim, punchline, or hook. Never waste the opener on setup or throat-clearing.
+
+VOICE ANTI-PATTERNS (NEVER do these — instant reject):
+- No metaphors about journeys, battles, or nature
+- No words like: "indeed", "thus", "upon", "whilst", "one must", "in the realm of", "amidst", "henceforth", "behold"
+- No philosophical framing ("existence", "the human condition", "life is a", "we are all")
+- No literary flourishes. This is a tweet from a 23-year-old dev, not an essay
+- No passive voice. Active only.
+- No filler openers: "In today's world", "As we navigate", "It's important to"
+
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
 NEVER end mid-sentence. Every response MUST be a complete thought with a closing period.
@@ -405,7 +417,18 @@ Target: Generate both a Topic and a Draft.
 Output Format: TOPIC|DRAFT
 
 CRITICAL: DO NOT include the words "Topic:" or "Draft:" in the output. Just the data separated by "|".
+LANGUAGE RULE: The TOPIC must ALWAYS be in English. If a trending topic is in Hindi, Hinglish, or any other language, translate it to English first.
 Example: AI Ethics|Why we need to talk about data bias. We must act now.
+
+STYLE EXAMPLES (match this energy, not the topic):
+BAD (reject these styles):
+- "In the realm of artificial intelligence, one must ponder the delicate balance..."
+- "As we traverse the ever-evolving landscape of technology..."
+GOOD (write like this):
+- "spent 3 hours debugging a race condition. the fix was one await. I'm fine."
+- "ngl RAG is 80% data cleaning. the 'AI' part takes 20 mins."
+- "nobody talks about how much of AI engineering is just... prompt formatting"
+- "built a full agent pipeline this week. most of the code is error handling lol."
 
 Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no emojis. 
 Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
@@ -416,7 +439,7 @@ Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
       logger.warn({ reason }, "LLM rate limit reached in contentGenerator, using fallback");
       return {
         topic: state.topic || "General Update",
-        draft: "Consistently building and shipping every day. Progress is the only metric that matters.",
+        draft: "still shipping. no updates, just commits.",
         iterationCount: 1
       };
     }
@@ -443,7 +466,7 @@ Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
     // Fallback if the main call and fallbacks all fail
     return {
       topic: state.topic || "General Update",
-      draft: "Consistently building and shipping every day. Progress is the only metric that matters.",
+      draft: "still shipping. no updates, just commits.",
       iterationCount: 1
     };
   }
@@ -479,7 +502,7 @@ function afterDiversityGate(state: typeof AgentState.State): "contentGenerator" 
 
 async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
-  const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, and adherence to constraints. Also provide a one-sentence critique.\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
+  const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, adherence to constraints, and voice authenticity. Also provide a one-sentence critique.\n\nSCORING RULES:\n- Deduct 2 points if the tweet uses formal/literary language, metaphors, or philosophical framing that doesn't match a 23-year-old GenZ dev voice.\n- Reward conversational, direct, punchy tweets that sound like real dev Twitter.\n- If the tweet contains words like "indeed", "thus", "upon", "whilst", "realm", "amidst", "behold", "traverse", "ponder" — score 4 or below and mention "formal" or "literary" in the critique.\n\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
 
   let score = 10;
   let critique = "Skipped critique due to timeout.";
@@ -541,6 +564,7 @@ async function autoRefiner(state: typeof AgentState.State) {
     poor_flow: "SMOOTH THE FLOW — rewrite for one continuous thought, cut awkward transitions.",
     needs_emotion: "ADD HUMAN TEXTURE — make it feel like a real person typed it, not a corporate draft.",
     low_quality: "FULL REWRITE — keep the topic, rebuild from scratch with a stronger angle.",
+    wrong_voice: "STRIP THE LITERARY VOICE — rewrite as a casual dev tweet. Short sentences. Real words. Zero metaphors.",
   };
 
   const directives = (state.critiqueHints ?? [])
