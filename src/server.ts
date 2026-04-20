@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
+import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { agentGraph } from './agent.js';
@@ -11,8 +14,109 @@ import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation
 import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
+
+// ── Security Middleware ──────────────────────────────────────────────────────
+// Helmet: sets secure HTTP headers (X-Frame-Options, CSP, HSTS, etc.)
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],  // inline scripts for edit/feedback forms
+      styleSrc: ["'self'", "'unsafe-inline'"],
+    }
+  }
+}));
+
+// CORS: restrict origins to known callers
+const ALLOWED_ORIGINS = [
+  process.env.BASE_URL,
+  process.env.N8N_WEBHOOK_URL,
+].filter(Boolean) as string[];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow requests with no origin (server-to-server, curl, n8n, Telegram)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.some(allowed => origin.startsWith(allowed))) {
+      return callback(null, true);
+    }
+    callback(new Error('Blocked by CORS'));
+  },
+  methods: ['GET', 'POST'],
+}));
+
+// Rate Limiting: global baseline
+const globalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, slow down.' },
+});
+app.use(globalLimiter);
+
+// Strict rate limiter for generation endpoint (expensive LLM calls)
+const generateLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Generation rate limit exceeded.' },
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// ── API Key Authentication Middleware ────────────────────────────────────────
+const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY;
+if (!INTERNAL_API_KEY) {
+  throw new Error("Missing INTERNAL_API_KEY in environment variables");
+}
+
+function requireApiKey(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const key = req.headers['x-api-key'] as string | undefined;
+  if (!key || key !== INTERNAL_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized — valid X-API-Key header required' });
+  }
+  next();
+}
+
+// ── URL Validation Helpers ───────────────────────────────────────────────────
+const ALLOWED_CALLBACK_HOSTS = new Set([
+  // Add your n8n host and any other trusted webhook receivers
+  ...(process.env.N8N_WEBHOOK_URL ? [new URL(process.env.N8N_WEBHOOK_URL).host] : []),
+]);
+
+function isAllowedCallbackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    if (!['https:', 'http:'].includes(parsed.protocol)) return false;
+    if (ALLOWED_CALLBACK_HOSTS.has(parsed.host)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedRedirect(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const allowed = ['twitter.com', 'x.com', 'www.twitter.com', 'www.x.com'];
+    return allowed.includes(parsed.host) && parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+// ── Telegram Webhook Verification ────────────────────────────────────────────
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || '';
+
+function verifyTelegramWebhook(req: express.Request): boolean {
+  // If a webhook secret is configured, verify the X-Telegram-Bot-Api-Secret-Token header
+  if (!TELEGRAM_WEBHOOK_SECRET) return true;  // no secret configured — skip (legacy compat)
+  const headerToken = req.headers['x-telegram-bot-api-secret-token'] as string | undefined;
+  return headerToken === TELEGRAM_WEBHOOK_SECRET;
+}
 
 // Health Check Endpoint
 app.get('/', (req, res) => {
@@ -53,6 +157,11 @@ function verifyToken(id: string, token: string) {
 
 // Add helper for background processing
 async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, callbackUrl?: string, previousDraft?: string, currentFeedback?: string) {
+  // Validate callbackUrl early to prevent SSRF
+  if (callbackUrl && !isAllowedCallbackUrl(callbackUrl)) {
+    logger.warn({ callbackUrl }, 'Blocked disallowed callbackUrl (SSRF prevention)');
+    callbackUrl = undefined;
+  }
   try {
     const startAgent = Date.now();
     logger.info({ tweetId }, 'Starting background generation...');
@@ -153,7 +262,8 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     };
 
     logger.info({ tweetId, draftLen: payload.draft.length, intentUrl: payload.intentUrl }, 'Background generation finished. Prepared payload.');
-    console.log('[DIAGNOSTIC] Final Payload:', JSON.stringify(payload, null, 2));
+    // Diagnostic log — server-side only, never sent to client
+    logger.info({ tweetId, draftLen: payload.draft.length }, 'Background generation payload ready');
 
     // If a callback URL exists (from n8n), send the results there
     if (callbackUrl) {
@@ -178,7 +288,7 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
   }
 }
 
-app.post('/api/generate', async (req, res) => {
+app.post('/api/generate', requireApiKey, generateLimiter, async (req, res) => {
   try {
     const { time_of_day = 'morning', topic, callbackUrl } = req.body || {};
     logger.info({ time_of_day, topic }, 'Generate request received (Async Mode)');
@@ -207,7 +317,7 @@ app.post('/api/generate', async (req, res) => {
 
   } catch (err: any) {
     logger.error({ err: err.message }, 'Failed to initiate generation');
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -389,7 +499,7 @@ app.get('/api/status/:id/timeline', async (req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Timeline lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
@@ -496,10 +606,13 @@ app.get('/api/view-feedback', (req, res) => {
 });
 
 app.post('/api/telegram/webhook', async (req, res) => {
-  const { callback_query, message } = req.body;
+  // Verify the request actually came from Telegram
+  if (!verifyTelegramWebhook(req)) {
+    logger.warn('Telegram webhook request failed secret verification');
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
-  // Basic validation (Telegram sends bot token in the URL if set up that way,
-  // but for simplicity we rely on ID/Token inside callback_data)
+  const { callback_query, message } = req.body;
 
   if (callback_query) {
     const chatId = callback_query.message.chat.id;
@@ -587,7 +700,10 @@ app.post('/api/edit', async (req, res) => {
 
   logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting immediate regeneration');
 
-  const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
+  const webhookUrl = process.env.N8N_WEBHOOK_URL;
+  if (!webhookUrl) {
+    logger.warn('N8N_WEBHOOK_URL not configured, regeneration callback will be skipped');
+  }
   processGenerationInBackground(id, updatedTweet.time_of_day, new_topic, webhookUrl)
     .catch(err => logger.error({ err }, 'Regeneration background error'));
 
@@ -613,7 +729,7 @@ app.post('/api/feedback', async (req, res) => {
   logger.info({ tweet_id: id }, 'Feedback received, requesting immediate regeneration');
 
   if (tweet) {
-    const webhookUrl = process.env.N8N_WEBHOOK_URL || 'https://lalitkumar1517.app.n8n.cloud/webhook/tweet-ready';
+    const webhookUrl = process.env.N8N_WEBHOOK_URL;
     const topicToUse = tweet.edited_topic || tweet.original_topic;
     const oldDraft = tweet.versions[0]?.content || "";
 
@@ -624,18 +740,18 @@ app.post('/api/feedback', async (req, res) => {
   res.json({ success: true, message: "Feedback received! Regenerating tweet. You'll receive a new Telegram message shortly." });
 });
 
-app.get('/api/admin/rate-status', async (_req, res) => {
+app.get('/api/admin/rate-status', requireApiKey, async (_req, res) => {
   try {
     const status = await getRateStatus();
     res.json({ success: true, ...status });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Rate status lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-app.get('/api/admin/failed-tasks', async (req, res) => {
+app.get('/api/admin/failed-tasks', requireApiKey, async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const tasks = await prisma.retryQueue.findMany({
@@ -658,22 +774,22 @@ app.get('/api/admin/failed-tasks', async (req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Failed task lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-app.get('/api/admin/engagement-pattern', async (_req, res) => {
+app.get('/api/admin/engagement-pattern', requireApiKey, async (_req, res) => {
   try {
     const data = await getEngagementPattern();
     res.json({ success: true, ...data });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Engagement pattern lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-app.get('/api/admin/topic-performance', async (req, res) => {
+app.get('/api/admin/topic-performance', requireApiKey, async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 20, 100);
     const data = await getTopicPerformance(limit);
@@ -681,22 +797,22 @@ app.get('/api/admin/topic-performance', async (req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Topic performance lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-app.get('/api/admin/quality-correlation', async (_req, res) => {
+app.get('/api/admin/quality-correlation', requireApiKey, async (_req, res) => {
   try {
     const data = await getQualityOutcomeCorrelation();
     res.json({ success: true, ...data });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, 'Quality correlation lookup failed');
-    res.status(500).json({ success: false, error: message });
+    res.status(500).json({ success: false, error: 'Internal server error' });
   }
 });
 
-app.post('/api/retries/process', async (req, res) => {
+app.post('/api/retries/process', requireApiKey, async (req, res) => {
   logger.info("Manual processing of retry queue requested");
   res.json({ success: true, message: "Queue is processed by background worker automatically" });
 });
@@ -705,6 +821,14 @@ app.get('/api/post-intent', async (req, res) => {
   const { id, username, intent } = req.query;
   if (!id || !username || !intent) {
     return res.status(400).send("Missing parameters");
+  }
+
+  const intentUrl = String(intent);
+
+  // Open redirect prevention: only allow redirects to Twitter/X
+  if (!isAllowedRedirect(intentUrl)) {
+    logger.warn({ intent: intentUrl }, 'Blocked open redirect to non-Twitter URL');
+    return res.status(400).json({ error: 'Invalid redirect target' });
   }
 
   // Enqueue detection task
@@ -719,8 +843,8 @@ app.get('/api/post-intent', async (req, res) => {
     logger.error({ err: err.message }, "Error enqueuing resolution task");
   }
 
-  // Redirect to real Twitter intent URL
-  res.redirect(String(intent));
+  // Redirect to validated Twitter intent URL
+  res.redirect(intentUrl);
 });
 
 // Start the background worker process
