@@ -46,6 +46,7 @@ app.use(cors({
 }));
 
 // Rate Limiting: global baseline
+app.set('trust proxy', 1); // Trust first loaded balancer/proxy (Railway)
 const globalLimiter = rateLimit({
   windowMs: 60_000,
   max: 60,
