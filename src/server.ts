@@ -14,6 +14,7 @@ import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation
 import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
+app.set('trust proxy', 1); // Respect X-Forwarded-For headers from Railway load balancer
 
 // ── Security Middleware ──────────────────────────────────────────────────────
 // Helmet: sets secure HTTP headers (X-Frame-Options, CSP, HSTS, etc.)
