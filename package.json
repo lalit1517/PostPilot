@@ -4,11 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npx prisma migrate deploy && node grafana/provision.js && tsx src/server.ts",
-    "worker": "npx prisma migrate deploy && tsx src/worker.ts",
+    "start": "npx prisma@6.4.1 migrate deploy && node grafana/provision.js && tsx src/server.ts",
+    "worker": "npx prisma@6.4.1 migrate deploy && tsx src/worker.ts",
     "dev": "nodemon -w src --ext ts --exec tsx src/server.ts",
-    "postinstall": "npx prisma generate",
-    "build": "npx prisma generate"
+    "postinstall": "npx prisma@6.4.1 generate",
+    "build": "npx prisma@6.4.1 generate"
   },
   "keywords": [],
   "author": "",
