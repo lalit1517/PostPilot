@@ -219,19 +219,41 @@ npm install
 Create `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://...          # Supabase transaction pooler connection string
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true
+                                       # Supabase transaction pooler (port 6543) + pgbouncer=true for Prisma compatibility
 GOOGLE_API_KEY=...                     # Google AI Studio API key
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
 TELEGRAM_BOT_TOKEN=...                 # From @BotFather
+TELEGRAM_WEBHOOK_SECRET=...            # Secret token for Telegram webhook verification (see below)
+N8N_WEBHOOK_URL=https://...            # n8n webhook URL for draft-ready callbacks
+INTERNAL_API_KEY=...                   # API key protecting admin + generate endpoints (see below)
 PORT=3000                              # Express server port
+GRAFANA_URL=https://yourorg.grafana.net  # Grafana Cloud stack URL (for dashboard provisioning)
+GRAFANA_API_KEY=...                    # Grafana service account token with Admin role (see grafana/README.md)
+GRAFANA_DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+                                       # Supabase session pooler (port 5432) for Grafana — stable for long-running analytical queries
 ```
 
-Generate `HMAC_SECRET`:
+Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex):
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+Generate `INTERNAL_API_KEY` (base64, URL-safe):
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+`INTERNAL_API_KEY` is required in the `X-API-Key` header for all `/api/admin/*`, `/api/generate`, and `/api/retries/process` requests.
+
+`TELEGRAM_WEBHOOK_SECRET` must be passed as `secret_token` when registering your webhook with Telegram:
+
+```bash
+curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
 
 ### 3. Set up the database
@@ -245,6 +267,53 @@ npx prisma generate
 
 1. Message [@BotFather](https://t.me/BotFather) — send `/newbot` to create a bot and get `TELEGRAM_BOT_TOKEN`.
 2. Message [@userinfobot](https://t.me/userinfobot) — send `/start` to get your chat ID for n8n.
+
+## Analytics (Grafana)
+
+PostPilot ships three pre-built Grafana dashboards that replace the need to open Supabase for any day-to-day monitoring.
+
+| Dashboard | What it shows |
+|---|---|
+| Tweet Performance | Lifecycle, engagement curves, outcome scores, topic leaderboard |
+| System Health | LLM budget gauges, worker queue, resolution funnel, failed tasks |
+| Learning Loop | Quality trends, Pearson r, feedback, persona evolution, topic blacklist |
+
+### 1. Sign up for Grafana Cloud
+
+Go to [grafana.com](https://grafana.com/products/cloud/) → **Start for free**. Your stack URL will be `https://<your-org>.grafana.net`.
+
+### 2. Get your API key
+
+1. Grafana UI → **Administration → Users and access → Service accounts**
+2. **Add service account** — name: `postpilot`, role: **Admin** (Admin is required for data source creation on Grafana Cloud)
+3. Click the account → **Add service account token** → Generate → copy the token (starts with `glsa_`)
+
+### 3. Add to `.env`
+
+```env
+GRAFANA_URL=https://<your-org>.grafana.net
+GRAFANA_API_KEY=glsa_...
+```
+
+### 4. Run the provision script
+
+```bash
+node grafana/provision.js
+```
+
+Output example:
+```
+✅ Data source created (uid: abc123)
+✅ Imported: tweet-performance.json → https://<your-org>.grafana.net/d/postpilot-tweet-performance/...
+✅ Imported: system-health.json → https://<your-org>.grafana.net/d/postpilot-system-health/...
+✅ Imported: learning-loop.json → https://<your-org>.grafana.net/d/postpilot-learning-loop/...
+```
+
+Open the printed URLs or go to `https://<your-org>.grafana.net/dashboards` to see all three dashboards.
+
+The script is idempotent — safe to re-run after dashboard changes.
+
+Optional Telegram alerts for LLM budget (≥80%) and worker failures — see [grafana/README.md](grafana/README.md).
 
 ## Deployment
 

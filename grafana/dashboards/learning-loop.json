@@ -1,0 +1,239 @@
+{
+  "title": "PostPilot — Learning Loop",
+  "uid": "postpilot-learning-loop",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "5m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Quality Score Trend",
+      "description": "LLM self-assessed quality per draft over time. Upward trend = prompt/persona is improving.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 14, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "fieldConfig": { "defaults": { "min": 1, "max": 10 } },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT created_at AS time, quality_score AS \"Quality Score\" FROM \"TweetVersion\" WHERE quality_score IS NOT NULL AND $__timeFilter(created_at) ORDER BY created_at",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "Pearson r (quality vs outcome)",
+      "description": "Correlation between LLM quality score and real engagement outcome. > 0.5 = strong signal.",
+      "type": "stat",
+      "gridPos": { "x": 14, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.3 }, { "color": "green", "value": 0.5 }] }
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT ROUND(CORR(quality_score, outcome_score)::numeric, 4) AS \"Pearson r\" FROM \"TweetOutcome\" WHERE quality_score IS NOT NULL",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Auto-Refiner Trigger Rate",
+      "description": "% of tweets where autoRefiner fired (version count > 1).",
+      "type": "stat",
+      "gridPos": { "x": 19, "y": 0, "w": 5, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT ROUND(100.0 * SUM(CASE WHEN v > 1 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 1) AS \"Refiner Fired %\" FROM (SELECT tweet_id, MAX(version) AS v FROM \"TweetVersion\" GROUP BY tweet_id) sub",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Diversity Re-roll Rate",
+      "description": "% of tweets where diversity gate triggered a re-roll (version count >= 2).",
+      "type": "stat",
+      "gridPos": { "x": 14, "y": 4, "w": 5, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": { "defaults": { "unit": "percent" } },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT ROUND(100.0 * SUM(CASE WHEN v >= 2 THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0), 1) AS \"Re-roll Rate %\" FROM (SELECT tweet_id, MAX(version) AS v FROM \"TweetVersion\" GROUP BY tweet_id) sub",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "High-Tier Tweets Since Last Evolution",
+      "description": "Count toward the 5-tweet threshold that triggers next persona evolution.",
+      "type": "stat",
+      "gridPos": { "x": 19, "y": 4, "w": 5, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 3 }, { "color": "purple", "value": 5 }] },
+          "mappings": [{ "type": "special", "options": { "match": "null", "result": { "text": "No data yet" } } }]
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT COUNT(*) AS \"High-tier since last evolution\" FROM \"TweetOutcome\" WHERE tier = 'high' AND computed_at > COALESCE((SELECT MAX(created_at) FROM \"PersonaProfile\"), '1970-01-01'::timestamptz)",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Quality vs Outcome Table",
+      "description": "Sort by quality_score to eyeball correlation. Use Pearson r stat above for the number.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "quality_score", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT tweet_id, ROUND(quality_score::numeric, 1) AS quality_score, ROUND(outcome_score::numeric, 2) AS outcome_score, tier FROM \"TweetOutcome\" WHERE quality_score IS NOT NULL ORDER BY quality_score DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "All Tweet Versions",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "created_at", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT tweet_id, version, ROUND(quality_score::numeric, 1) AS quality_score, LEFT(content, 140) AS content_preview, LEFT(critique, 120) AS critique_preview, created_at FROM \"TweetVersion\" ORDER BY created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 8,
+      "title": "All Feedback",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 16, "w": 16, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "created_at", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT f.tweet_id, f.feedback_text, ROUND(f.weighted_score::numeric, 4) AS weighted_score, CASE WHEN LOWER(f.feedback_text) ~ '(great|good|love|excellent|perfect|awesome|well done|keep|nice|solid)' THEN 'positive' WHEN LOWER(f.feedback_text) ~ '(bad|wrong|poor|off|stop|avoid|dont|don''t|too much|too long|boring|weak|generic)' THEN 'negative' WHEN LOWER(f.feedback_text) ~ '(tone|style|voice|format|structure|shorter|longer|casual|formal)' THEN 'stylistic' ELSE 'neutral' END AS sentiment, f.created_at FROM \"Feedback\" f ORDER BY f.created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Feedback Sentiment Breakdown",
+      "type": "piechart",
+      "gridPos": { "x": 16, "y": 16, "w": 8, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT CASE WHEN LOWER(feedback_text) ~ '(great|good|love|excellent|perfect|awesome|well done|keep|nice|solid)' THEN 'positive' WHEN LOWER(feedback_text) ~ '(bad|wrong|poor|off|stop|avoid|dont|don''t|too much|too long|boring|weak|generic)' THEN 'negative' WHEN LOWER(feedback_text) ~ '(tone|style|voice|format|structure|shorter|longer|casual|formal)' THEN 'stylistic' ELSE 'neutral' END AS sentiment, COUNT(*) AS count FROM \"Feedback\" GROUP BY 1",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Feedback Volume per Day",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 23, "w": 12, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT date_trunc('day', created_at) AS \"time\", COUNT(*) AS submissions FROM \"Feedback\" WHERE $__timeFilter(created_at) GROUP BY 1 ORDER BY 1",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 11,
+      "title": "Feedback Weighted Score Distribution",
+      "type": "histogram",
+      "gridPos": { "x": 12, "y": 23, "w": 12, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT weighted_score FROM \"Feedback\" WHERE weighted_score IS NOT NULL",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 12,
+      "title": "Active Persona",
+      "description": "Current active PersonaProfile text — what the agent uses right now.",
+      "type": "text",
+      "gridPos": { "x": 0, "y": 29, "w": 12, "h": 10 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "mode": "markdown" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT profile_text AS \"Active Persona\" FROM \"PersonaProfile\" WHERE is_active = true ORDER BY created_at DESC LIMIT 1",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 13,
+      "title": "Persona Evolution Timeline",
+      "description": "All PersonaProfile versions. Click a row to read that version's full profile text.",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 29, "w": 12, "h": 10 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "version", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT version, based_on_tweets, is_active, created_at, LEFT(profile_text, 300) AS profile_preview FROM \"PersonaProfile\" ORDER BY version DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 14,
+      "title": "Topic Blacklist Candidates (bottom 20%)",
+      "description": "Topics the agent should stop writing about — lowest avg outcome scores. Requires >= 2 tweets per topic.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 39, "w": 12, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "avg_outcome", "desc": false }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "WITH topic_stats AS (SELECT LOWER(TRIM(topic)) AS topic, COUNT(*) AS tweets, AVG(outcome_score) AS avg_score FROM \"TweetOutcome\" WHERE topic IS NOT NULL GROUP BY 1 HAVING COUNT(*) >= 2), ranked AS (SELECT *, PERCENT_RANK() OVER (ORDER BY avg_score) AS pct FROM topic_stats) SELECT topic, tweets, ROUND(avg_score::numeric, 2) AS avg_outcome FROM ranked WHERE pct <= 0.2 ORDER BY avg_score ASC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 15,
+      "title": "Avg Quality Score by LLM Model",
+      "description": "Tracks quality across model fallbacks — useful if Gemini 2.5 Flash is unavailable.",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 39, "w": 12, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT l.model, COUNT(*) AS calls, ROUND(AVG(v.quality_score)::numeric, 2) AS avg_quality FROM \"LlmCallLog\" l LEFT JOIN \"TweetVersion\" v ON v.created_at BETWEEN l.called_at - INTERVAL '5 minutes' AND l.called_at + INTERVAL '5 minutes' WHERE l.call_type IN ('generate','score') GROUP BY l.model ORDER BY calls DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ]
+}
