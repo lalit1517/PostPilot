@@ -329,20 +329,25 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 4. **Environment Variables**:
    - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
    - `DIRECT_URL`: Direct Connection (Port 5432) — **Required** for migrations.
-   - `BASE_URL`: Your Render dashboard URL (e.g., `https://postpilot-aa5b.onrender.com`).
+   - `BASE_URL`: Your Render dashboard URL (e.g., `https://<your-app-name>.onrender.com`).
    - Add all other keys listed in the [Setup](#setup) section.
 
 > [!TIP]
 > **Pro Tip**: If your n8n workflow uses the `workflows.json` export, ensure the **HTTP Request** nodes have a timeout set to **120 seconds** (120000ms). This gives Render enough time to "wake up" your service from a cold start if the keep-alive pinger hasn't triggered recently.
 
-### 24/7 Keep-Alive (GitHub Actions)
+### 24/7 Keep-Alive (UptimeRobot)
 
-To prevent the Render free tier from sleeping, a GitHub Action is included in `.github/workflows/keep-alive.yml` to ping your URL every 15 minutes.
+Render's free tier sleeps after 15 minutes of inactivity. To keep PostPilot running 24/7 without "cold starts," we recommend using **[UptimeRobot](https://uptimerobot.com/)** (Free).
 
-1. Go to **Settings > Secrets and variables > Actions** in your repo.
-2. Add a new repository secret:
-   - **Name**: `RENDER_URL`
-   - **Value**: Your Render public URL.
+1. Create a free account at [UptimeRobot.com](https://uptimerobot.com/).
+2. Click **+ Add New Monitor**.
+3. **Monitor Type**: `HTTP(s)`
+4. **Friendly Name**: `PostPilot-Live`
+5. **URL**: `https://<your-app-name>.onrender.com`
+6. **Monitoring Interval**: Every `5 minutes`.
+7. Click **Create Monitor**.
+
+This ensures your database connection pool stays active and your background workers never pause.
 
 ### Railway (Alternative)
 
