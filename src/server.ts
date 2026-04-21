@@ -16,6 +16,23 @@ import { runWorker, enqueueRetry } from './worker.js';
 const app = express();
 app.set('trust proxy', 1); // Respect X-Forwarded-For headers from Railway load balancer
 
+// ── Request Logger ──────────────────────────────────────────────────────────
+// Logs all incoming requests to help visualize pings (Render, GitHub, etc.)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    logger.info({
+      method: req.method,
+      path: req.path,
+      ip: req.ip,
+      status: res.statusCode,
+      duration: `${duration}ms`
+    }, `[HTTP] ${req.method} ${req.path}`);
+  });
+  next();
+});
+
 // ── Security Middleware ──────────────────────────────────────────────────────
 // Helmet: sets secure HTTP headers (X-Frame-Options, CSP, HSTS, etc.)
 app.use(helmet({
