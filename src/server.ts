@@ -864,12 +864,13 @@ app.get('/api/post-intent', async (req, res) => {
   res.redirect(intentUrl);
 });
 
-// Start the background worker process
-runWorker();
-
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
+  
+  // Start the background worker process after the port is open
+  runWorker();
+
   console.log(`📍 [URL] ${process.env.BASE_URL || 'http://localhost:3000'}`);
 
   if (!process.env.BASE_URL) {
