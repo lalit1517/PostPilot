@@ -47,7 +47,9 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "timeout": 120000
+        }
       },
       "id": "78bda043-34e8-4228-b8bc-a887b64f9e1e",
       "name": "Generate Tweet",
@@ -124,7 +126,9 @@
             }
           ]
         },
-        "options": {}
+        "options": {
+          "timeout": 120000
+        }
       },
       "id": "b6f00f07-de80-4911-aa9b-5fb8995aeeef",
       "name": "Process Retries",
