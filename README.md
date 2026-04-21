@@ -346,7 +346,7 @@ If you are using the provided `workflows.json`, you must perform these manual st
 1.  **Timing**: In the **CRON (Generate)** node, set your preferred schedule for tweet generation.
     *   > [!IMPORTANT]
     *   > **Recommended**: Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
-    *   > **Why?**: With ~3 LLM calls per tweet, 3 scheduled posts use roughly 9-10 calls. The remaining ~50% of your daily budget (**20 calls per day**) is reserved as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, which trigger immediate regenerations. This ensures you never get locked out during a critical edit.
+    *   > **Why?**: With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
     *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
     *   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
 2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
