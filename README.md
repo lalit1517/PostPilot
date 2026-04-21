@@ -1,9 +1,11 @@
 # PostPilot
 
-Autonomous content agent for X (Twitter). Generates AI drafts, tracks engagement over 72 hours, and evolves its writing style from real performance data — fully closed-loop.
+PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered by LangGraph, it manages a complete content lifecycle—from drafting and invisible fingerprinting to 72-hour engagement tracking and outcome-driven persona evolution—all within a single self-learning loop. The system integrates a Human-in-the-Loop (HITL) safety gate via Telegram, ensuring 100% human verification before any content is published.
 
 ## Table of Contents
 
+- [Core Innovations](#core-innovations)
+- [Tech Stack](#tech-stack)
 - [Architecture](#architecture)
 - [Self-Learning Pipeline](#self-learning-pipeline)
 - [AI Agent (LangGraph)](#ai-agent-langgraph)
@@ -11,9 +13,36 @@ Autonomous content agent for X (Twitter). Generates AI drafts, tracks engagement
 - [API Reference](#api-reference)
 - [Database Schema](#database-schema)
 - [Setup](#setup)
-- [Deployment](#deployment)
-- [CLI Commands](#cli-commands)
+  - [Prerequisites](#prerequisites)
+  - [1. Install dependencies](#1-install-dependencies)
+  - [2. Configure environment](#2-configure-environment)
+  - [3. Set up the database](#3-set-up-the-database)
+  - [4. Set up Telegram bot](#4-set-up-telegram-bot)
+  - [5. Configure n8n](#5-configure-n8n)
+- [Safety & Policy Compliance](#safety--policy-compliance)
 - [Hard Constraints](#hard-constraints)
+- [Analytics (Grafana)](#analytics-grafana)
+
+## Core Innovations
+
+- **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API.
+- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Diversity Gate** to prevent content repetition and a **Conditional Auto-Refiner** that triggers only when quality scores are low.
+- **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance.
+- **Free-Tier Monolith Architecture**: High-density engineering designed specifically for resource-constrained environments. Consolidates the Express API and a multi-task Background Worker into a single process that fits perfectly within Render's Free Tier.
+- **Scientific Quality Analysis**: Includes advanced analytics like **Pearson Correlation** tracking between LLM-assigned quality scores and real-world engagement, allowing for data-backed calibration of the agent's intelligence.
+
+## Tech Stack
+
+| Layer | Technology |
+| :--- | :--- |
+| Runtime | Node.js 20+ / TypeScript |
+| Framework | Express 5 |
+| AI Engine | LangGraph + Google Gemini (via @langchain/google-genai) |
+| Database | PostgreSQL via Prisma ORM (Supabase) |
+| Scheduling | n8n |
+| Notifications | Telegram Bot API |
+| Logging | Pino |
+| Infrastructure | Render (Compute) + UptimeRobot (Keep-alive) |
 
 ## Architecture
 
@@ -153,6 +182,24 @@ At attempt 5 (final):
 
 **Cooldown:** 5-minute minimum between snapshots. Anti-bot jitter on all requests (0-2000ms).
 
+#### Customizing Tracking Intervals
+PostPilot tracks engagement over 48–72 hours by default. You can change this duration by editing `src/worker.ts`:
+
+*   **Total Tracking Days**: To track for longer (e.g., 7 days):
+    1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for Days 3, 4, 5, 6, and 7.
+    2.  Update the **finalization block** (`if (attempt === 5)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
+    
+    ```typescript
+    // src/worker.ts (~line 288)
+    if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;         // Day 0: 10m -> 1h
+    else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000;  // Day 0: 1h -> 6h
+    else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // Day 0 -> Day 1 (24h)
+    else if (attempt >= 4 && attempt < 10) {
+      nextFetchDelay = 24 * 60 * 60 * 1000;                      // Day 2, 3, 4, 5, 6, 7
+    }
+    ```
+*   **Important**: If you increase the number of attempts beyond 5, you must also update the `max_retries` value in the `enqueueRetry` call (around line 171) to ensure the database doesn't mark the task as failed before it finishes the 7-day cycle.
+
 ### EVOLVE_PERSONA
 
 Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previous profiles, creates new active `PersonaProfile`.
@@ -204,7 +251,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 - Node.js 20+
 - PostgreSQL database (Supabase recommended)
-- Google AI Studio API key
+- [Google AI Studio API key](https://aistudio.google.com/app/apikey)
 - Telegram bot (for notifications)
 - n8n instance (for scheduling)
 
@@ -223,7 +270,8 @@ DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supa
                                        # Supabase transaction pooler (port 6543) + pgbouncer=true for Prisma compatibility
 DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
                                        # Supabase direct connection (port 5432) — required for Prisma migrations
-GOOGLE_API_KEY=...                     # Google AI Studio API key
+GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/app/apikey
+                                       # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
@@ -267,8 +315,67 @@ npx prisma generate
 
 ### 4. Set up Telegram bot
 
-1. Message [@BotFather](https://t.me/BotFather) — send `/newbot` to create a bot and get `TELEGRAM_BOT_TOKEN`.
-2. Message [@userinfobot](https://t.me/userinfobot) — send `/start` to get your chat ID for n8n.
+1.  **Generate Access Token**:
+    *   Message [@BotFather](https://t.me/BotFather) and send `/newbot`.
+    *   Follow instructions to set a **Name** (display) and **Username** (must end in `bot`, e.g., `PostPilot_bot`).
+    *   Copy the **API Token** provided.
+2.  **Get Chat ID**: Message [@userinfobot](https://t.me/userinfobot) and send `/start` to get your numeric Chat ID.
+3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` in your `.env` or Render variables.
+
+### 5. Configure n8n
+
+#### Importing Workflows
+1.  **Create Workflows**: In n8n, create two new empty workflows.
+2.  **Import Files**:
+    *   Open Workflow 1 → **Three Dots (Top Right)** → **Import from File** → Select `workflows.json`.
+    *   Open Workflow 2 → **Three Dots (Top Right)** → **Import from File** → Select `workflows-error.json`.
+3.  **Set Credentials**: In both workflows, open all **Telegram** nodes and click **Select Credential**. Create a new credential, paste your `TELEGRAM_BOT_TOKEN` as the Access Token, and verify it.
+
+#### Linking the Error Handler
+1.  **Setup Error Workflow**: Open the workflow you imported from `workflows-error.json`. Test it, and then click **Publish** (top right).
+2.  **Link and Publish Main**:
+    *   Open your main workflow (`workflows.json`).
+    *   Click **Three Dots (Top Right)** → **Settings**.
+    *   In the **Error Workflow** dropdown, select the error workflow you just published.
+    *   **Click Publish** (top right) in the main workflow.
+3.  **Why?**: This ensures the schedules and webhooks are active, and if any node fails, a detailed alert is sent to your Telegram immediately.
+
+#### Manual Node Configuration
+If you are using the provided `workflows.json`, you must perform these manual steps in the n8n UI after importing:
+
+1.  **Timing**: In the **CRON (Generate)** node, set your preferred schedule for tweet generation.
+    *   > [!IMPORTANT]
+    *   > **Recommended**: Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
+    *   > **Why?**: With ~3 LLM calls per tweet, 3 scheduled posts use roughly 9-10 calls. The remaining ~50% of your daily budget (**20 calls per day**) is reserved as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, which trigger immediate regenerations. This ensures you never get locked out during a critical edit.
+    *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
+    *   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
+2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
+    *   `🚀 Open in X` — URL: `{{ $json.body.intentUrl }}` (Expression)
+    *   `✏️ Edit Topic` — URL: `{{ $json.body.editUrl }}` (Expression)
+    *   `💬 Feedback` — URL: `{{ $json.body.feedbackUrl }}` (Expression)
+    *   `✅ Posted` — Callback Data: `{{ "pc:" + $json.body.tweet_id + ":" + $json.body.token.substring(0,8) }}` (Expression)
+3.  **Telegram Settings**: In the same node, set **Reply Markup** to `Inline Keyboard` and **Parse Mode** to `HTML`.
+4.  **Telegram Text**: Set the **Text** field to the following (Expression):
+    ```html
+    🚀 <b>New X Post Draft - {{ $json.body.topic }}</b>
+    ---
+    <b>Draft:</b>
+    <pre><code>{{ $json.body.htmlDraft || $json.body.draft }}</code></pre>
+
+    <b>Time:</b> {{ $json.body.time_of_day || 'Not set' }}
+    <b>Score:</b> {{ $json.body.score || 0 }}/10
+    ---
+    ```
+5.  **Webhook Integration**:
+    *   Open the **Webhook (Tweet Ready)** node in n8n.
+    *   Switch to the **Production** tab and copy the **Production URL**.
+    *   In your server's environment variables (Render/`.env`), set `N8N_WEBHOOK_URL` to this copied URL.
+6.  **API Credentials**:
+    *   In both the **Generate Tweet** and **Process Retries** nodes (HTTP Request), locate the URL and Header fields.
+    *   Replace `{{ $env.BASE_URL }}` with your actual domain (e.g., `https://you.onrender.com`).
+    *   Replace `{{ $env.INTERNAL_API_KEY }}` with your `INTERNAL_API_KEY`.
+    *   > [!NOTE]
+    *   > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
 
 ## Analytics (Grafana)
 
@@ -364,22 +471,21 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | `npx prisma migrate dev --name <name>` | Create and apply a new migration |
 | `npx prisma generate` | Regenerate Prisma client types |
 
+## Safety & Policy Compliance
+
+PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
+
+- **Human-in-the-Loop (HITL)**: By separating *intelligence* (AI drafting) from *action* (manual posting), you remain a "regular user" in the eyes of X. You never hand over your account credentials to an automated script for posting.
+- **Invisible Fingerprinting**: We use zero-width Unicode characters (`U+200B`/`U+200C`) to link drafts to real-world engagement. This allows the system to learn from performance without using the Official X API and without cluttering your tweets with visible tracking IDs.
+- **Decoupled Scraping**: Tracking is performed via **Nitter** (external proxies) and the public **Syndication API**. Your account is never used for data scraping, ensuring that if a tracking endpoint is rate-limited, your X handle remains unaffected.
+- **Content Diversity Gate**: The integrated Jaccard similarity check ensures that you never accidentally post repetitive or "spammy" content, protecting your account from shadowbans and reputation decay.
+
 ## Hard Constraints
 
 - **Max 3 LLM calls** per tweet generation in the happy path (contentGenerator, qualityScorer, autoRefiner-conditional). Worst case 4 with a diversity re-roll (single extra `contentGenerator` call).
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 - **Google AI Studio free tier:** 5 RPM, 20 RPD — all calls rate-guarded via `src/rateGuard.ts`.
-- **All self-learning logic is pure computation** — outcomeScorer, feedbackWeighter, analytics, diversity, length-target, and topic-blacklist math use zero LLM calls.
+- **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 - **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → [autoRefiner] → END`. Re-roll edge: `diversityGate → contentGenerator` (capped at 1).
 
-## Tech Stack
 
-| Layer | Technology |
-| :--- | :--- |
-| Runtime | Node.js 20+ / TypeScript |
-| Framework | Express 5 |
-| AI Engine | LangGraph + Google Gemini (via @langchain/google-genai) |
-| Database | PostgreSQL via Prisma ORM (Supabase) |
-| Scheduling | n8n |
-| Notifications | Telegram Bot API |
-| Logging | Pino |
