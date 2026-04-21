@@ -15,7 +15,7 @@ model Tweet {
   score          Float          @default(0)
   posted         Boolean        @default(false)
   x_tweet_id     String?        // Null until successfully posted
-  status         String         @default("PENDING") // PENDING, APPROVED, POSTED_CONFIRMED, ERROR
+  status         String         @default("PENDING") // PENDING, GENERATING, APPROVED, POSTED_CONFIRMED, RESOLVE_FAILED, ERROR
   intent_url     String?
   live_url       String?
   fingerprint    String?        @unique
