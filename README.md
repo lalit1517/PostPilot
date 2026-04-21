@@ -344,9 +344,9 @@ npx prisma generate
 If you are using the provided `workflows.json`, you must perform these manual steps in the n8n UI after importing:
 
 1.  **Timing**: In the **CRON (Generate)** node, set your preferred schedule for tweet generation.
-    *   > [!IMPORTANT]
-    *   > **Recommended**: Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
-    *   > **Why?**: With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
+    > [!IMPORTANT]
+    > **Recommended**: Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
+    > **Why?**: With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
     *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
     *   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
 2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
@@ -374,8 +374,8 @@ If you are using the provided `workflows.json`, you must perform these manual st
     *   In both the **Generate Tweet** and **Process Retries** nodes (HTTP Request), locate the URL and Header fields.
     *   Replace `{{ $env.BASE_URL }}` with your actual domain (e.g., `https://you.onrender.com`).
     *   Replace `{{ $env.INTERNAL_API_KEY }}` with your `INTERNAL_API_KEY`.
-    *   > [!NOTE]
-    *   > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
+    > [!NOTE]
+    > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
 
 ## 📊 Analytics (Grafana)
 
