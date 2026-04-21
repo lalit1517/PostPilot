@@ -188,7 +188,8 @@ PostPilot tracks engagement over 48–72 hours by default. You can change this d
 *   **Total Tracking Days**: To track for longer (e.g., 7 days):
     1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for Days 3, 4, 5, 6, and 7.
     2.  Update the **finalization block** (`if (attempt === 5)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
-    
+
+
     ```typescript
     // src/worker.ts (~line 288)
     if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;         // Day 0: 10m -> 1h
@@ -344,12 +345,16 @@ npx prisma generate
 If you are using the provided `workflows.json`, you must perform these manual steps in the n8n UI after importing:
 
 1.  **Timing**: In the **CRON (Generate)** node, set your preferred schedule for tweet generation.
+
     > [!IMPORTANT]
+    >
     > **Recommended**: Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
+    >
     > **Why?**: With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
     *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
     *   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
 2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
+
     *   `🚀 Open in X` — URL: `{{ $json.body.intentUrl }}` (Expression)
     *   `✏️ Edit Topic` — URL: `{{ $json.body.editUrl }}` (Expression)
     *   `💬 Feedback` — URL: `{{ $json.body.feedbackUrl }}` (Expression)
@@ -374,6 +379,7 @@ If you are using the provided `workflows.json`, you must perform these manual st
     *   In both the **Generate Tweet** and **Process Retries** nodes (HTTP Request), locate the URL and Header fields.
     *   Replace `{{ $env.BASE_URL }}` with your actual domain (e.g., `https://you.onrender.com`).
     *   Replace `{{ $env.INTERNAL_API_KEY }}` with your `INTERNAL_API_KEY`.
+
     > [!NOTE]
     > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
 
