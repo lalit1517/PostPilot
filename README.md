@@ -99,6 +99,29 @@ Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detec
 
 The `RetryQueue` table manages three async task types processed every 10 seconds.
 
+### Telegram Buttons — What Each Does
+
+When a draft arrives in Telegram, you get four buttons. Here's exactly what each one does:
+
+**🚀 Open in X** — the primary posting path. Tapping it:
+1. Hits `/api/post-intent` on the server (logs the click, enqueues `RESOLVE_TWEET` with a 10-min delay)
+2. Redirects your browser to X's compose box, pre-filled with the draft + invisible fingerprint
+3. You post it manually on X
+4. 10 minutes later, `RESOLVE_TWEET` fires automatically and matches the fingerprint → marks `POSTED_CONFIRMED` → starts engagement tracking
+
+**✅ Posted** — manual override only. Use this when:
+- You destroyed the fingerprint (edited the tweet end on X before posting)
+- Nitter and Twitter timeline both failed to find the tweet
+- You posted but the auto-detection silently failed
+
+Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, and **mutates the button label to "✅ Marked as Posted"** in the same Telegram message. If `RESOLVE_TWEET` still finds nothing after all retries, the tweet is reverted to `RESOLVE_FAILED` (not treated as posted).
+
+> **You almost never need the Posted button.** Open in X handles everything automatically via fingerprint. Posted is the escape hatch for when things go wrong.
+
+**✏️ Edit Topic / 💬 Feedback** — open secure HMAC-signed web forms. Submit triggers a full regeneration with the new topic or feedback injected into the pipeline.
+
+**📋 Copy** — sends the raw draft text to your Telegram chat for manual copy-paste.
+
 ### RESOLVE_TWEET
 
 Detects posted tweets via invisible fingerprint matching.
@@ -107,7 +130,9 @@ Detects posted tweets via invisible fingerprint matching.
 2. Polls 4 Nitter instances (`nitter.net`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`) and falls back to the native Twitter timeline with browser-like headers.
 3. Matches the 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 4. On match: marks tweet as `POSTED_CONFIRMED`, schedules first engagement fetch.
-5. On miss: one delayed retry at ~45 minutes, then marks `ERROR`.
+5. On miss: one delayed retry at ~45 minutes, then sets status to `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null` — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+
+**Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit any visible part of the tweet in X's compose box, including adding, changing, or removing text and punctuation. The fingerprint is only destroyed if you delete characters past the last visible character (i.e. backspace through the trailing space into the invisible suffix), or select-all and retype. When in doubt: edit the middle, leave the end alone.
 
 ### FETCH_ENGAGEMENT
 
@@ -164,7 +189,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status, fingerprint, live_url, posted_at |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `ERROR`), fingerprint, live_url, posted_at |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — likes, retweets, impressions at each interval |

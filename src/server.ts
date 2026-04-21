@@ -650,7 +650,23 @@ app.post('/api/telegram/webhook', async (req, res) => {
         logger.error("Failed to enqueue resolution");
       }
 
-      await sendTelegramMessage(chatId, `✅ Marked as Posted!\nVerification polling started (10m delay).\nTweet ID: \`${tweetId}\``);
+      // Mutate the original Telegram message: replace buttons with "Marked as Posted" state
+      const messageId = callback_query.message.message_id;
+      const baseUrl = process.env.BASE_URL || '';
+      const postedToken = generateToken(tweetId);
+      const updatedKeyboard = {
+        inline_keyboard: [
+          [{ text: "🚀 Open in X", url: tweet.intent_url || 'https://twitter.com' }],
+          [{ text: "✏️ Edit Topic", url: `${baseUrl}/api/view-edit?id=${tweetId}&token=${postedToken}` }],
+          [{ text: "💬 Feedback", url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}` }],
+          [{ text: "✅ Marked as Posted", callback_data: "noop" }, { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }],
+        ],
+      };
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: JSON.stringify(updatedKeyboard) }),
+      }).catch(err => logger.warn({ err: (err as Error).message }, 'Failed to edit Telegram message markup'));
     } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
       await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);

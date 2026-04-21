@@ -69,9 +69,9 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
       } else {
         await prisma.tweet.update({
           where: { id: tweetId },
-          data: { status: 'ERROR' }
+          data: { status: 'RESOLVE_FAILED', posted: false, posted_at: null }
         });
-        logger.error({ tweetId }, "Tweet not found after initial + fallback retries. Giving up.");
+        logger.error({ tweetId }, "Tweet not found after all retries. Marked RESOLVE_FAILED — fingerprint destroyed or tweet never posted.");
       }
     }
   } catch (error: any) {
