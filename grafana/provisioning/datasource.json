@@ -1,0 +1,22 @@
+{
+  "name": "PostPilot Supabase",
+  "url": "",
+  "type": "grafana-postgresql-datasource",
+  "access": "proxy",
+  "isDefault": false,
+  "jsonData": {
+    "database": "",
+    "host": "",
+    "maxOpenConns": 5,
+    "maxIdleConns": 5,
+    "connMaxLifetime": 14400,
+    "postgresVersion": 1500,
+    "sslmode": "require",
+    "tlsSkipVerify": true,
+    "timescaledb": false
+  },
+  "secureJsonData": {
+    "password": ""
+  },
+  "user": ""
+}

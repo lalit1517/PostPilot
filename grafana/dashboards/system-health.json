@@ -1,0 +1,210 @@
+{
+  "title": "PostPilot — System Health",
+  "uid": "postpilot-system-health",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-7d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "RPM — Calls last 60s (limit: 5)",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "minVizValue": 0,
+        "maxVizValue": 5,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 3 }, { "color": "red", "value": 5 }] },
+          "min": 0, "max": 5
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT COUNT(*) AS \"RPM\" FROM \"LlmCallLog\" WHERE called_at > NOW() - INTERVAL '60 seconds'",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 2,
+      "title": "RPD — Calls last 24h (limit: 20)",
+      "type": "gauge",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "minVizValue": 0,
+        "maxVizValue": 20,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 16 }, { "color": "red", "value": 19 }] },
+          "min": 0, "max": 20
+        }
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT COUNT(*) AS \"RPD\" FROM \"LlmCallLog\" WHERE called_at > NOW() - INTERVAL '24 hours'",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "PENDING Tasks",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 3, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"Pending\" FROM \"RetryQueue\" WHERE status = 'PENDING'", "format": "table", "refId": "A" }]
+    },
+    {
+      "id": 4,
+      "title": "PROCESSING Tasks",
+      "type": "stat",
+      "gridPos": { "x": 15, "y": 0, "w": 3, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"Processing\" FROM \"RetryQueue\" WHERE status = 'PROCESSING'", "format": "table", "refId": "A" }]
+    },
+    {
+      "id": 5,
+      "title": "COMPLETED Tasks",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 3, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }] } } },
+      "targets": [{ "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"Completed\" FROM \"RetryQueue\" WHERE status = 'COMPLETED'", "format": "table", "refId": "A" }]
+    },
+    {
+      "id": 6,
+      "title": "FAILED Tasks",
+      "type": "stat",
+      "gridPos": { "x": 21, "y": 0, "w": 3, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } } },
+      "targets": [{ "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"Failed\" FROM \"RetryQueue\" WHERE status = 'FAILED'", "format": "table", "refId": "A" }]
+    },
+    {
+      "id": 7,
+      "title": "LLM Call History (calls/hour by type)",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 5, "w": 16, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT date_trunc('hour', called_at) AS \"time\", call_type, COUNT(*) AS calls FROM \"LlmCallLog\" WHERE $__timeFilter(called_at) GROUP BY 1, 2 ORDER BY 1",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 8,
+      "title": "LLM Call Log",
+      "type": "table",
+      "gridPos": { "x": 16, "y": 5, "w": 8, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "called_at", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT called_at, model, call_type FROM \"LlmCallLog\" ORDER BY called_at DESC LIMIT 200",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Tweet Resolution Funnel",
+      "description": "Fingerprint set → confirmed posted → failed to resolve → success rate",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 4 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "orientation": "horizontal", "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"With Fingerprint\" FROM \"Tweet\" WHERE fingerprint IS NOT NULL", "format": "table", "refId": "A" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"POSTED_CONFIRMED\" FROM \"Tweet\" WHERE status = 'POSTED_CONFIRMED'", "format": "table", "refId": "B" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"RESOLVE_FAILED\" FROM \"Tweet\" WHERE status = 'RESOLVE_FAILED'", "format": "table", "refId": "C" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT CASE WHEN COUNT(*) FILTER (WHERE fingerprint IS NOT NULL) = 0 THEN 0 ELSE ROUND(COUNT(*) FILTER (WHERE status='POSTED_CONFIRMED')::numeric / COUNT(*) FILTER (WHERE fingerprint IS NOT NULL) * 100, 1) END AS \"Resolution Rate %\" FROM \"Tweet\"", "format": "table", "refId": "D" }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Task Type Breakdown (by status)",
+      "type": "barchart",
+      "gridPos": { "x": 0, "y": 17, "w": 12, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT task_type, status, COUNT(*) AS count FROM \"RetryQueue\" GROUP BY task_type, status ORDER BY task_type, status",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 11,
+      "title": "Resolve Attempt Distribution",
+      "description": "How many retries RESOLVE_TWEET tasks needed — higher = fingerprint detection is struggling.",
+      "type": "barchart",
+      "gridPos": { "x": 12, "y": 17, "w": 12, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT attempts::text AS \"Attempt #\", COUNT(*) AS count FROM \"RetryQueue\" WHERE task_type = 'RESOLVE_TWEET' GROUP BY attempts ORDER BY attempts",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 12,
+      "title": "Failed Tasks",
+      "description": "All tasks that exhausted retries. Use /api/admin/failed-tasks for the same data.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 24, "w": 24, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "updated_at", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT id, task_type, payload::text AS payload, attempts, max_retries, last_error, created_at, updated_at FROM \"RetryQueue\" WHERE status = 'FAILED' ORDER BY updated_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 13,
+      "title": "Pending Tasks (next fire time)",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 31, "w": 12, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "process_after", "desc": false }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT id, task_type, payload::text AS payload, attempts, process_after FROM \"RetryQueue\" WHERE status = 'PENDING' ORDER BY process_after ASC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 14,
+      "title": "Engagement Fetch Progress (per tweet)",
+      "description": "Which engagement attempt (1–5) was last completed and when the next fetch fires.",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 31, "w": 12, "h": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT t.id AS tweet_id, LEFT(t.original_topic, 40) AS topic, t.status, COALESCE(MAX(r.attempts), 0) AS last_attempt, MAX(r.process_after) AS next_scheduled FROM \"Tweet\" t LEFT JOIN \"RetryQueue\" r ON (r.payload->>'tweetId' = t.id AND r.task_type = 'FETCH_ENGAGEMENT' AND r.status = 'PENDING') GROUP BY t.id, t.original_topic, t.status ORDER BY t.created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ]
+}
