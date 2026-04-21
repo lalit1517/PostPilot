@@ -14,7 +14,7 @@ import { getEngagementPattern, getTopicPerformance, getQualityOutcomeCorrelation
 import { runWorker, enqueueRetry } from './worker.js';
 
 const app = express();
-app.set('trust proxy', 1); // Respect X-Forwarded-For headers from Railway load balancer
+app.set('trust proxy', 1); // Trust Render's proxy to get the correct user IP and protocol
 
 // ── Request Logger ──────────────────────────────────────────────────────────
 // Logs all incoming requests to help visualize pings (Render, GitHub, etc.)
