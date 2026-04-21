@@ -1,8 +1,8 @@
-# PostPilot
+# 🚀 PostPilot
 
 PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered by LangGraph, it manages a complete content lifecycle—from drafting and invisible fingerprinting to 72-hour engagement tracking and outcome-driven persona evolution—all within a single self-learning loop. The system integrates a Human-in-the-Loop (HITL) safety gate via Telegram, ensuring 100% human verification before any content is published.
 
-## Table of Contents
+## 📑 Table of Contents
 
 - [Core Innovations](#core-innovations)
 - [Tech Stack](#tech-stack)
@@ -23,15 +23,15 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 - [Hard Constraints](#hard-constraints)
 - [Analytics (Grafana)](#analytics-grafana)
 
-## Core Innovations
+## 💡 Core Innovations
 
-- **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API.
+- **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API. 🔒
 - **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Diversity Gate** to prevent content repetition and a **Conditional Auto-Refiner** that triggers only when quality scores are low.
-- **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance.
+- **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance. 🧪
 - **Free-Tier Monolith Architecture**: High-density engineering designed specifically for resource-constrained environments. Consolidates the Express API and a multi-task Background Worker into a single process that fits perfectly within Render's Free Tier.
-- **Scientific Quality Analysis**: Includes advanced analytics like **Pearson Correlation** tracking between LLM-assigned quality scores and real-world engagement, allowing for data-backed calibration of the agent's intelligence.
+- **Scientific Quality Analysis**: Includes advanced analytics like **Pearson Correlation** tracking between LLM-assigned quality scores and real-world engagement, allowing for data-backed calibration of the agent's intelligence. 📈
 
-## Tech Stack
+## 🛠️ Tech Stack
 
 | Layer | Technology |
 | :--- | :--- |
@@ -44,7 +44,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 | Logging | Pino |
 | Infrastructure | Render (Compute) + UptimeRobot (Keep-alive) |
 
-## Architecture
+## 🏗️ Architecture
 
 ```
 n8n (scheduler)           Telegram (notifications)
@@ -66,7 +66,7 @@ n8n (scheduler)           Telegram (notifications)
 2. **Intelligence** — LangGraph StateGraph with 6 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution).
 
-## Self-Learning Pipeline
+## 🔄 Self-Learning Pipeline
 
 PostPilot improves its own writing over time without manual tuning.
 
@@ -94,7 +94,7 @@ Generation (3 LLM calls max)
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. 22h cooldown gate. |
 | Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
 
-## AI Agent (LangGraph)
+## 🧠 AI Agent (LangGraph)
 
 **Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> [autoRefiner if score < 8] -> END`
 
@@ -124,11 +124,11 @@ Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detec
 
 **Config:** Temperature 0.7, max 2048 output tokens, topP 0.9, 2-minute timeout per call.
 
-## Background Workers
+## 👷 Background Workers
 
 The `RetryQueue` table manages three async task types processed every 10 seconds.
 
-### Telegram Buttons — What Each Does
+### 🔘 Telegram Buttons — What Each Does
 
 When a draft arrives in Telegram, you get four buttons. Here's exactly what each one does:
 
@@ -208,7 +208,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 `reweightFeedback()` runs independently every 6 hours via in-memory timestamp gate in the worker loop.
 
-## API Reference
+## 🔌 API Reference
 
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
@@ -230,7 +230,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 **Security:** Edit/feedback URLs are signed with HMAC-SHA256 (8-char prefix). Verified via timing-safe comparison.
 
-## Database Schema
+## 🗄️ Database Schema
 
 8 models on PostgreSQL (Supabase), managed by Prisma ORM.
 
@@ -245,7 +245,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `LlmCallLog` | Rate limiting ledger with `called_at` index, pruned to 48h window |
 | `RetryQueue` | Task queue — RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA |
 
-## Setup
+## ⚙️ Setup
 
 ### Prerequisites
 
@@ -377,7 +377,7 @@ If you are using the provided `workflows.json`, you must perform these manual st
     *   > [!NOTE]
     *   > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
 
-## Analytics (Grafana)
+## 📊 Analytics (Grafana)
 
 PostPilot ships three pre-built Grafana dashboards that replace the need to open Supabase for any day-to-day monitoring.
 
@@ -424,7 +424,7 @@ The script is idempotent — safe to re-run after dashboard changes.
 
 Optional Telegram alerts for LLM budget (≥80%) and worker failures — see [grafana/README.md](grafana/README.md).
 
-## Deployment
+## 🚢 Deployment
 
 PostPilot is optimized for the **Render Free Tier**, utilizing a monolith architecture to keep the server and background worker running in a single process.
 
@@ -460,7 +460,7 @@ This ensures your database connection pool stays active and your background work
 
 If you prefer Railway, you can deploy as a single service using `npm start` or as two separate services using `npm start` (API) and `npm run worker` (Worker). Ensure you set both `DATABASE_URL` and `DIRECT_URL`.
 
-## CLI Commands
+## 💻 CLI Commands
 
 | Command | Description |
 | :--- | :--- |
@@ -471,7 +471,7 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | `npx prisma migrate dev --name <name>` | Create and apply a new migration |
 | `npx prisma generate` | Regenerate Prisma client types |
 
-## Safety & Policy Compliance
+## 🛡️ Safety & Policy Compliance
 
 PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
 
@@ -480,7 +480,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 - **Decoupled Scraping**: Tracking is performed via **Nitter** (external proxies) and the public **Syndication API**. Your account is never used for data scraping, ensuring that if a tracking endpoint is rate-limited, your X handle remains unaffected.
 - **Content Diversity Gate**: The integrated Jaccard similarity check ensures that you never accidentally post repetitive or "spammy" content, protecting your account from shadowbans and reputation decay.
 
-## Hard Constraints
+## ⚖️ Hard Constraints
 
 - **Max 3 LLM calls** per tweet generation in the happy path (contentGenerator, qualityScorer, autoRefiner-conditional). Worst case 4 with a diversity re-roll (single extra `contentGenerator` call).
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
