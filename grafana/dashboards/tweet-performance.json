@@ -1,0 +1,192 @@
+{
+  "title": "PostPilot — Tweet Performance",
+  "uid": "postpilot-tweet-performance",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-30d", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Status Breakdown",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 3 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "horizontal",
+        "colorMode": "background",
+        "graphMode": "none"
+      },
+      "targets": [
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"PENDING\" FROM \"Tweet\" WHERE status = 'PENDING'", "format": "table", "refId": "A" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"GENERATING\" FROM \"Tweet\" WHERE status = 'GENERATING'", "format": "table", "refId": "B" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"APPROVED\" FROM \"Tweet\" WHERE status = 'APPROVED'", "format": "table", "refId": "C" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"POSTED_CONFIRMED\" FROM \"Tweet\" WHERE status = 'POSTED_CONFIRMED'", "format": "table", "refId": "D" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"RESOLVE_FAILED\" FROM \"Tweet\" WHERE status = 'RESOLVE_FAILED'", "format": "table", "refId": "E" },
+        { "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" }, "rawSql": "SELECT COUNT(*) AS \"ERROR\" FROM \"Tweet\" WHERE status = 'ERROR'", "format": "table", "refId": "F" }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Tweet Lifecycle Table",
+      "description": "All tweets with full lifecycle info. has_feedback and topic_edited columns show at a glance which tweets received user input.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 3, "w": 24, "h": 10 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": {
+        "sortBy": [{ "displayName": "created_at", "desc": true }],
+        "footer": { "show": true, "reducer": ["count"], "fields": ["id"] }
+      },
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "live_url" }, "properties": [{ "id": "links", "value": [{ "title": "Open on X", "url": "${__value.raw}", "targetBlank": true }] }] },
+          { "matcher": { "id": "byName", "options": "topic_edited" }, "properties": [{ "id": "custom.displayMode", "value": "color-background" }, { "id": "thresholds", "value": { "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] } }] },
+          { "matcher": { "id": "byName", "options": "has_feedback" }, "properties": [{ "id": "custom.displayMode", "value": "color-background" }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT t.id, t.original_topic, t.edited_topic, CASE WHEN t.edited_topic IS NOT NULL AND t.edited_topic != t.original_topic THEN 1 ELSE 0 END AS topic_edited, t.status, t.time_of_day, t.score, t.posted, t.posted_at, t.live_url, t.fingerprint, t.created_at, CASE WHEN f.cnt > 0 THEN 'Yes' ELSE 'No' END AS has_feedback FROM \"Tweet\" t LEFT JOIN (SELECT tweet_id, COUNT(*) AS cnt FROM \"Feedback\" GROUP BY tweet_id) f ON t.id = f.tweet_id ORDER BY t.created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 3,
+      "title": "Unposted Tweets (slipped through)",
+      "description": "Tweets where posted=false but status is not PENDING or GENERATING — needs investigation.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 5 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT id, original_topic, edited_topic, status, fingerprint, created_at FROM \"Tweet\" WHERE posted = false AND status NOT IN ('PENDING','GENERATING') ORDER BY created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 4,
+      "title": "Outcome Score Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 18, "w": 16, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "fieldConfig": {
+        "defaults": { "min": 0, "max": 100, "unit": "short" },
+        "overrides": []
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT computed_at AS time, outcome_score AS \"Outcome Score\" FROM \"TweetOutcome\" WHERE $__timeFilter(computed_at) ORDER BY computed_at",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 5,
+      "title": "Tier Distribution",
+      "type": "piechart",
+      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "medium" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT tier, COUNT(*) AS count FROM \"TweetOutcome\" GROUP BY tier",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 6,
+      "title": "Peak Engagement by Tweet",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "outcome_score", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT o.tweet_id, o.topic, o.peak_likes, o.peak_retweets, ROUND(o.outcome_score::numeric, 2) AS outcome_score, o.tier, o.time_of_day, o.day_of_week, o.computed_at FROM \"TweetOutcome\" o ORDER BY o.outcome_score DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 7,
+      "title": "Engagement Growth Curves (likes)",
+      "description": "Each tweet's like count across all 5 engagement snapshots (10m → 48h).",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 33, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT e.fetched_at AS time, e.likes AS \"Likes\", e.tweet_id FROM \"Engagement\" e WHERE $__timeFilter(e.fetched_at) ORDER BY e.fetched_at",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 8,
+      "title": "Engagement Growth Curves (retweets)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 33, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT e.fetched_at AS time, e.retweets AS \"Retweets\", e.tweet_id FROM \"Engagement\" e WHERE $__timeFilter(e.fetched_at) ORDER BY e.fetched_at",
+        "format": "time_series",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 9,
+      "title": "Best Posting Slot (time × day)",
+      "description": "Avg outcome score per time-of-day × day-of-week combination. Higher = better slot.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 41, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "avg_outcome", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT time_of_day, day_of_week, COUNT(*) AS tweets, ROUND(AVG(outcome_score)::numeric, 2) AS avg_outcome, ROUND((SUM(CASE WHEN tier='high' THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*),0)) * 100, 1) AS high_tier_pct FROM \"TweetOutcome\" WHERE time_of_day IS NOT NULL AND day_of_week IS NOT NULL GROUP BY time_of_day, day_of_week ORDER BY avg_outcome DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 10,
+      "title": "Topic Performance (top 20)",
+      "type": "table",
+      "gridPos": { "x": 12, "y": 41, "w": 12, "h": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "avg_outcome", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT LOWER(TRIM(topic)) AS topic, COUNT(*) AS tweets, ROUND(AVG(outcome_score)::numeric, 2) AS avg_outcome, SUM(CASE WHEN tier='high' THEN 1 ELSE 0 END) AS high_tier_count FROM \"TweetOutcome\" WHERE topic IS NOT NULL GROUP BY LOWER(TRIM(topic)) ORDER BY avg_outcome DESC LIMIT 20",
+        "format": "table",
+        "refId": "A"
+      }]
+    },
+    {
+      "id": 11,
+      "title": "Tweet Versions (all drafts)",
+      "description": "Every generated draft with quality score and critique. Multiple versions per tweet_id = autoRefiner fired.",
+      "type": "table",
+      "gridPos": { "x": 0, "y": 49, "w": 24, "h": 7 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+      "options": { "sortBy": [{ "displayName": "created_at", "desc": true }] },
+      "targets": [{
+        "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
+        "rawSql": "SELECT tweet_id, version, quality_score, LEFT(content, 140) AS content_preview, LEFT(critique, 120) AS critique_preview, created_at FROM \"TweetVersion\" ORDER BY created_at DESC",
+        "format": "table",
+        "refId": "A"
+      }]
+    }
+  ]
+}
