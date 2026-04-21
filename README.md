@@ -332,6 +332,9 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
    - `BASE_URL`: Your Render dashboard URL (e.g., `https://postpilot-aa5b.onrender.com`).
    - Add all other keys listed in the [Setup](#setup) section.
 
+> [!TIP]
+> **Pro Tip**: If your n8n workflow uses the `workflows.json` export, ensure the **HTTP Request** nodes have a timeout set to **120 seconds** (120000ms). This gives Render enough time to "wake up" your service from a cold start if the keep-alive pinger hasn't triggered recently.
+
 ### 24/7 Keep-Alive (GitHub Actions)
 
 To prevent the Render free tier from sleeping, a GitHub Action is included in `.github/workflows/keep-alive.yml` to ping your URL every 15 minutes.
