@@ -327,7 +327,7 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 2. **Build Command**: `npm run build` (runs `prisma generate`).
 3. **Start Command**: `npm start` (automatically runs migrations, provisions Grafana, and starts the server + worker).
 4. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true`.
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
    - `DIRECT_URL`: Direct Connection (Port 5432) — **Required** for migrations.
    - `BASE_URL`: Your Render dashboard URL (e.g., `https://postpilot-aa5b.onrender.com`).
    - Add all other keys listed in the [Setup](#setup) section.
