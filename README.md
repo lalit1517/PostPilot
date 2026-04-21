@@ -221,6 +221,8 @@ Create `.env` in the project root:
 ```env
 DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true
                                        # Supabase transaction pooler (port 6543) + pgbouncer=true for Prisma compatibility
+DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+                                       # Supabase direct connection (port 5432) — required for Prisma migrations
 GOOGLE_API_KEY=...                     # Google AI Studio API key
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
 BASE_URL=https://your-domain.com       # Deployment root URL
@@ -317,27 +319,31 @@ Optional Telegram alerts for LLM budget (≥80%) and worker failures — see [gr
 
 ## Deployment
 
-PostPilot requires two processes: the API server and the background worker.
+PostPilot is optimized for the **Render Free Tier**, utilizing a monolith architecture to keep the server and background worker running in a single process.
 
-### Railway (Recommended)
+### Render (Recommended Free Tier)
 
-**Option A: Two services** (recommended)
+1. **Create Web Service**: Connect your GitHub repository to Render.
+2. **Build Command**: `npm run build` (runs `prisma generate`).
+3. **Start Command**: `npm start` (automatically runs migrations, provisions Grafana, and starts the server + worker).
+4. **Environment Variables**:
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true`.
+   - `DIRECT_URL`: Direct Connection (Port 5432) — **Required** for migrations.
+   - `BASE_URL`: Your Render dashboard URL (e.g., `https://postpilot-aa5b.onrender.com`).
+   - Add all other keys listed in the [Setup](#setup) section.
 
-1. Create two services from the same repo.
-2. Service 1 (API): start command `npm start`
-3. Service 2 (Worker): start command `npm run worker`
+### 24/7 Keep-Alive (GitHub Actions)
 
-**Option B: Single service**
+To prevent the Render free tier from sleeping, a GitHub Action is included in `.github/workflows/keep-alive.yml` to ping your URL every 15 minutes.
 
-```bash
-npm install concurrently
-```
+1. Go to **Settings > Secrets and variables > Actions** in your repo.
+2. Add a new repository secret:
+   - **Name**: `RENDER_URL`
+   - **Value**: Your Render public URL.
 
-Update `package.json`:
+### Railway (Alternative)
 
-```json
-"start": "concurrently \"npm start\" \"npm run worker\""
-```
+If you prefer Railway, you can deploy as a single service using `npm start` or as two separate services using `npm start` (API) and `npm run worker` (Worker). Ensure you set both `DATABASE_URL` and `DIRECT_URL`.
 
 ## CLI Commands
 
