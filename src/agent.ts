@@ -68,7 +68,6 @@ const OWNER_PROFILE = {
   ],
   language: [
     "Plain English by default",
-    "Occasional Hinglish for humor or relatability (e.g. 'bhai', 'yaar', 'arre yaar', 'kya kar raha hai')",
     "No jargon without payoff — earn the technical term",
     "Short sentences. No filler. No corporate speak.",
   ],
@@ -82,8 +81,8 @@ const OWNER_PROFILE = {
     "debugging things that 'should just work'",
   ],
   slangs: [
-    "hehe", "lol", "lmao", "ngl", "tbh", "fr fr", "no cap", "bro", "bhai",
-    "yaar", "arre", "bruh", "deadass", "lowkey", "highkey", "based", "W", "L",
+    "hehe", "lol", "lmao", "ngl", "tbh", "fr fr", "no cap", "bro",
+    "bruh", "lowkey", "highkey", "based", "W", "L",
     "it's giving", "not gonna lie", "the audacity",
   ],
   avoid: [
@@ -346,7 +345,7 @@ ${state.learnedPersona}\n`
 
   // Few-shot exemplars: top historical tweets as style anchors (not topic anchors)
   const exemplarsBlock = state.context && state.context.length > 0
-    ? `\n[STYLE EXEMPLARS — your best-performing historical tweets. Match this VOICE and RHYTHM, not the topic]:\n${state.context.slice(0, 3).map((c, i) => `Example ${i + 1}: ${c}`).join('\n')}\n`
+    ? `\n[STYLE EXEMPLARS — match THIS rhythm, directness, and sentence length. Do NOT copy the topic or subject matter]:\n${state.context.slice(0, 3).map((c, i) => `Example ${i + 1}: ${c}`).join('\n')}\n`
     : "";
 
   // Dynamic length target from high-tier outcomes
@@ -390,6 +389,12 @@ ${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${lengthBlock}${blacklist
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 HOOK RULE: The first 60 characters MUST carry the core claim, punchline, or hook. Never waste the opener on setup or throat-clearing.
 
+CONTENT APPROACH — prefer in this order:
+1. First-person dev experiences ("spent 3h debugging X", "shipped Y today", "just realized Z")
+2. Opinions and observations ("RAG is mostly data cleaning", "half of AI engineering is prompt formatting")
+3. Dry humor about dev culture
+4. Industry news/releases — ONLY if it's in the TRENDING NOW list above. Never from memory.
+
 VOICE ANTI-PATTERNS (NEVER do these — instant reject):
 - No metaphors about journeys, battles, or nature
 - No words like: "indeed", "thus", "upon", "whilst", "one must", "in the realm of", "amidst", "henceforth", "behold"
@@ -397,6 +402,13 @@ VOICE ANTI-PATTERNS (NEVER do these — instant reject):
 - No literary flourishes. This is a tweet from a 23-year-old dev, not an essay
 - No passive voice. Active only.
 - No filler openers: "In today's world", "As we navigate", "It's important to"
+- No specific model version numbers (3.7, 4.0, o3, o1, etc.) framed as news or launches — versions are facts you can get wrong. Talk about the model by name only if it's in TRENDING NOW.
+
+HINGLISH RULE: DO NOT force "bhai", "yaar", "arre yaar", "kya kar raha hai", or any Hinglish into the tweet. Use Hinglish ONLY if the tweet genuinely needs it for humor and reads awkwardly without it. When in doubt, use plain English. Forced Hinglish is worse than no Hinglish.
+
+RECENCY RULE: Today's date is ${new Date().toISOString().split('T')[0]}. NEVER frame anything as "just launched", "new release", "just dropped", or "breaking" unless it appears in the TRENDING NOW list above. Your training data may be months old — treat any specific product release, model version, or news event as potentially outdated. Stick to observations, opinions, and experiences rather than news claims.
+
+CASING RULE: After the first sentence ends (. or ! or ?), start the next word in lowercase UNLESS it is a proper noun, acronym, product name, brand, or title-case word (e.g. AI, LangGraph, React, Gemini, Claude, TypeScript, Node.js). Standard English nouns like "the", "it", "my", "this", "i" must be lowercase at sentence start (except the pronoun "I" which stays uppercase).
 
 Output MUST be plain text. No markdown, no bolding (**), no hashtags.
 STRICT REQUIREMENT: Your draft MUST be under 280 characters. Be concise.
@@ -434,8 +446,11 @@ GOOD (write like this):
 - "nobody talks about how much of AI engineering is just... prompt formatting"
 - "built a full agent pipeline this week. most of the code is error handling lol."
 
-Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no emojis. 
-Ensure the last sentence is COMPLETED. DO NOT leave it hanging.`;
+Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no emojis.
+Ensure the last sentence is COMPLETED. DO NOT leave it hanging.
+CONTENT PRIORITY: Prefer first-person dev experiences and opinions over industry news. Experiences don't age. News does.
+RECENCY: NEVER say "just launched", "new release", "just dropped", or mention specific version numbers (3.7, 4.0, o3, etc.) as news unless the topic is in the TRENDING NOW list. Your training data may be months old.
+HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fits organically.`;
 
   try {
     const { allowed, reason } = await canCallLLM();
@@ -506,7 +521,7 @@ function afterDiversityGate(state: typeof AgentState.State): "contentGenerator" 
 
 async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
-  const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, adherence to constraints, and voice authenticity. Also provide a one-sentence critique.\n\nSCORING RULES:\n- Deduct 2 points if the tweet uses formal/literary language, metaphors, or philosophical framing that doesn't match a 23-year-old GenZ dev voice.\n- Reward conversational, direct, punchy tweets that sound like real dev Twitter.\n- If the tweet contains words like "indeed", "thus", "upon", "whilst", "realm", "amidst", "behold", "traverse", "ponder" — score 4 or below and mention "formal" or "literary" in the critique.\n\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
+  const prompt = `${state.personaParameters}\n\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, adherence to constraints, and voice authenticity. Also provide a one-sentence critique.\n\nSCORING RULES:\n- Deduct 2 points if the tweet uses formal/literary language, metaphors, or philosophical framing that doesn't match a 23-year-old GenZ dev voice.\n- Reward conversational, direct, punchy tweets that sound like real dev Twitter.\n- If the tweet contains words like "indeed", "thus", "upon", "whilst", "realm", "amidst", "behold", "traverse", "ponder" — score 4 or below and mention "formal" or "literary" in the critique.\n- Deduct 3 points if the tweet makes a factual claim about a specific product launch, version number, or news event that could be outdated (e.g. "X just launched", "Y version released", "new Z is out"). Opinions and observations are fine; stale news claims are not.\n\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
 
   let score = 10;
   let critique = "Skipped critique due to timeout.";
