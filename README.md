@@ -534,8 +534,8 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
 1. **Create Web Service**: Connect your GitHub repository to Render.
 2. **Build Command**: `npm run build` (runs `prisma generate`).
-3. **Start Command**: `npm start` (runs migrations, provisions Grafana, then starts the server + in-process worker).
-4. **Manual Release Command**: run `npm run release` when you want to apply migrations and dashboard changes without starting the web service.
+3. **Start Command**: `npm start` (runs migrations, then starts the server + in-process worker).
+4. **Dashboard Release Command**: run `npm run release:grafana` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
    - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
 
@@ -575,11 +575,12 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | Command | Description |
 | :--- | :--- |
 | `npm run dev` | Start API server in watch mode (nodemon) |
-| `npm start` | Run release tasks, then start API server and in-process worker |
+| `npm start` | Run migrations, then start API server and in-process worker |
 | `npm run worker` | Start only the background task processor |
 | `npm run migrate` | Apply pending migrations to database |
 | `npm run provision:grafana` | Provision Grafana datasource and dashboards |
-| `npm run release` | Run migrations, then provision Grafana |
+| `npm run release` | Run migrations |
+| `npm run release:grafana` | Run migrations, then provision Grafana |
 | `npx prisma migrate dev --name <name>` | Create and apply a new migration |
 | `npx prisma generate` | Regenerate Prisma client types |
 

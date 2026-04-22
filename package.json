@@ -4,12 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "npm run release && tsx src/server.ts",
+    "start": "npm run migrate && tsx src/server.ts",
     "worker": "tsx src/worker-entry.ts",
     "dev": "nodemon -w src --ext ts --exec tsx src/server.ts",
     "migrate": "npx prisma@6.4.1 migrate deploy",
     "provision:grafana": "node grafana/provision.js",
-    "release": "npm run migrate && npm run provision:grafana",
+    "release": "npm run migrate",
+    "release:grafana": "npm run migrate && npm run provision:grafana",
     "postinstall": "npx prisma@6.4.1 generate",
     "build": "npx prisma@6.4.1 generate"
   },
