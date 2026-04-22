@@ -28,7 +28,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 
 - **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API. 🔒
 
-- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Diversity Gate** to prevent content repetition and a **Conditional Auto-Refiner** that triggers only when quality scores are low.
+- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety, and a **Conditional Auto-Refiner** that triggers only when quality scores are low.
 
 - **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance. 🧪
 
@@ -102,10 +102,11 @@ Generation (3 LLM calls max)
 | Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with min-max scaling vs 30-day window. Persists `topic`, `time_of_day`, `day_of_week` for analytics. Tiers: top 20% = high, bottom 30% = low. |
 | Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
 | Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
-| Draft Diversity | `src/draftDiversity.ts` | 0 | Trigram Jaccard similarity against last 10 drafts. Threshold 0.85. Consumed by the `diversityGate` node — triggers one re-roll on duplicate. |
+| Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier (TIME_STRUGGLE / QUESTION / TAKE / CROWD_CLAIM / NUMBER / FIRST_PERSON / SECOND_PERSON / TEMPORAL_MARKER / DECLARATION / GENERIC) + arc tokens (CONTRAST / LESSON / SELF_DEPRECATE / PUNCHLINE_END). Emits a `DiversityReport` on every rejection. |
+| Draft Formats | `src/draftFormats.ts` | 0 | 8 archetypes (HOT_TAKE, QUESTION_HOOK, STORY_LESSON, CONTRARIAN_FACT, NUMBERED_INSIGHT, PERSONAL_WIN, RANT, OBSERVATION). `getNextFormat()` picks least-recently-used archetype in the last 4 fingerprints. Pure and deterministic. |
 | Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Fed into `contextLoader`. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
-| Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. 22h cooldown gate. |
+| Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`) to prevent pattern over-reinforcement. 22h cooldown gate. |
 | Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
 
 
@@ -117,10 +118,10 @@ Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detec
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Parallel fetch: top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, Trends24 topics filtered via `OWNER_PROFILE.trendKeywords`, `computeLengthTarget()` (avg±stdev from high-tier outcomes), `computeTopicBlacklist()` (bottom-20% topics). |
-| `personaAdapter` | No | Builds `OWNER_IDENTITY` from module-level `OWNER_PROFILE` (identity, domains, moods, tones, language, experienceVoice, cities, hobbies, slangs, avoid, trendKeywords). Injects few-shot exemplars (top 3 historical tweets), hook-first rule (first 60 chars = core claim), dynamic length target, topic blacklist, tone-by-time-of-day, learned persona, trend hint, recent-topics-to-avoid, feedback guidelines, and a `VOICE ANTI-PATTERNS` guardrail that bans literary/philosophical language, metaphors, passive voice, and filler openers. |
+| `contextLoader` | No | Parallel fetch: top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, Trends24 topics filtered via `OWNER_PROFILE.trendKeywords`, `computeLengthTarget()` (avg±stdev from high-tier outcomes), `computeTopicBlacklist()` (bottom-20% topics), last 15 structural fingerprints, and `getNextFormat()` → assigned `FormatArchetype` for this run. |
+| `personaAdapter` | No | Prepends a `---FORMAT DIRECTIVE (MANDATORY)---` block BEFORE the persona identity so it overrides stylistic habits (archetype name + structure description + shape hint, explicit ban on `spent X hours` openers, dynamic contrast-arc ban when 2+ of last 3 tweets used CONTRAST). Then builds `OWNER_IDENTITY` from module-level `OWNER_PROFILE` (identity, domains, moods, tones, language, experienceVoice, cities, hobbies, slangs, avoid, trendKeywords). Injects few-shot exemplars (top 3 historical tweets), hook-first rule (first 60 chars = core claim), dynamic length target, topic blacklist, tone-by-time-of-day, learned persona, trend hint, recent-topics-to-avoid, feedback guidelines, and a `VOICE ANTI-PATTERNS` guardrail that bans literary/philosophical language, metaphors, passive voice, and filler openers. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Output passed through `finalizeDraft()`. Static fallback if rate-limited. |
-| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 10 drafts (trigram Jaccard ≥ 0.85). On duplicate, routes back to `contentGenerator` for one re-roll. Second duplicate accepted. |
+| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts — either triggers a re-roll. On duplicate, routes back to `contentGenerator` for one re-roll; second duplicate accepted. Accepted drafts push a `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` fingerprint to the 15-slot in-memory ring buffer. Emits a full `DiversityReport` (rejection kind, matched fingerprint, same-fingerprint count in last 20) on every rejection. |
 | `qualityScorer` | Yes | Scores 1-10 via `parseScore()` with explicit voice-authenticity criteria (deducts 2 points for literary/philosophical tone). Runs `parseCritiqueHints()` to convert free-form critique into a structured hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`). Persists `quality_score` to TweetVersion. |
 | `autoRefiner` | Conditional | Rewrites if score < 8. Maps `critiqueHints` to concrete rewrite directives via `HINT_DIRECTIVES` (e.g. `weak_hook` → "REWRITE THE OPENER — first 60 chars must land the core claim"). Output gated by `isSuspiciousDraft()`; rejection keeps original. Skipped at score ≥ 8. |
 
@@ -140,6 +141,12 @@ Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detec
 - `computeLengthTarget()` — derives `{min, max}` length window from last 20 high-tier `TweetOutcome` rows (avg±stdev). Returns `null` if <5 samples.
 
 - `computeTopicBlacklist()` — bottom-20% topics from `getTopicPerformance(50)`. Returns `[]` if <10 topic samples.
+
+- `extractStructuralFingerprint(text)` — topic-agnostic shape fingerprint (`OPEN:<kind>|CONTRAST|LESSON|SELF_DEPRECATE|PUNCHLINE_END`). No hardcoded topics or keywords — classifies openings via structural regex only.
+
+- `getNextFormat(recentFingerprints)` — pure, deterministic LRU archetype selector over 8 archetypes; falls back to hash-seeded deterministic pick when all formats were used in the last 4 tweets.
+
+- `composeFingerprint(formatName, observed)` / `pushFingerprintToBuffer(fp)` / `getRecentStructuralFingerprints(n)` — fingerprint plumbing. Ring buffer is in-memory (no schema change); DB fallback derives fingerprints on the fly from `TweetVersion.content`.
 
 **Models:** `gemini-2.5-flash` (primary, `thinkingBudget: 1024`) -> `gemini-3.1-flash-lite-preview` -> `gemini-3-flash-preview` -> `gemini-2.5-flash-lite` (fallbacks)
 
@@ -594,7 +601,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Decoupled Scraping**: Tracking is performed via **Nitter** (external proxies) and the public **Syndication API**. Your account is never used for data scraping, ensuring that if a tracking endpoint is rate-limited, your X handle remains unaffected.
 
-- **Content Diversity Gate**: The integrated Jaccard similarity check ensures that you never accidentally post repetitive or "spammy" content, protecting your account from shadowbans and reputation decay.
+- **Content Diversity Gate**: Dual-layer check — trigram Jaccard (text similarity) **and** structural fingerprint (opening pattern + narrative arc) — plus an LRU format rotation across 8 archetypes. Protects the account from shadowbans and "same-shape" pattern decay even when the topic changes.
 
 ## ⚖️ Hard Constraints
 

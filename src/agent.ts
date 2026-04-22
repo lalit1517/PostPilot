@@ -5,7 +5,15 @@ import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import { canCallLLM, recordLLMCall } from "./rateGuard.js";
 import { getTrendingTopics } from "./trends.js";
-import { checkDraftDiversity } from "./draftDiversity.js";
+import {
+  checkDraftDiversity,
+  composeFingerprint,
+  extractStructuralFingerprint,
+  getRecentStructuralFingerprints,
+  pushFingerprintToBuffer,
+} from "./draftDiversity.js";
+import { getNextFormat } from "./draftFormats.js";
+import type { FormatArchetype } from "./draftFormats.js";
 import { getTopicPerformance } from "./analytics.js";
 
 const AgentState = Annotation.Root({
@@ -28,6 +36,8 @@ const AgentState = Annotation.Root({
   lengthTarget: Annotation<{ min: number; max: number } | null>({ reducer: (x, y) => y ?? x, default: () => null }),
   topicBlacklist: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   rerollCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
+  formatArchetype: Annotation<FormatArchetype | null>({ reducer: (x, y) => y ?? x, default: () => null }),
+  recentFingerprints: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
 });
 
 // ✅ FIX 1: Temperature lowered to 1.3 (safe, still creative)
@@ -256,7 +266,7 @@ async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
 
-  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics, lengthTarget, topicBlacklist] = await Promise.all([
+  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics, lengthTarget, topicBlacklist, recentFingerprints] = await Promise.all([
     prisma.engagement.findMany({
       orderBy: { likes: 'desc' },
       take: 5,
@@ -283,7 +293,10 @@ async function contextLoader(state: typeof AgentState.State) {
     getTrendingTopics(),
     computeLengthTarget(),
     computeTopicBlacklist(),
+    getRecentStructuralFingerprints(15),
   ]);
+
+  const formatArchetype = getNextFormat(recentFingerprints);
 
   // Use weighted feedback if 3+ exist, otherwise fallback to unweighted
   const feedbackSource = weightedFeedbackQuery.length >= 3
@@ -310,6 +323,8 @@ async function contextLoader(state: typeof AgentState.State) {
     lengthTarget,
     blacklistCount: topicBlacklist.length,
     contextCount: context.length,
+    assignedFormat: formatArchetype.name,
+    recentFingerprintCount: recentFingerprints.length,
   }, "Finished contextLoader");
   return {
     context,
@@ -320,6 +335,8 @@ async function contextLoader(state: typeof AgentState.State) {
     lengthTarget,
     topicBlacklist,
     iterationCount: state.iterationCount || 0,
+    formatArchetype,
+    recentFingerprints,
   };
 }
 
@@ -358,6 +375,24 @@ ${state.learnedPersona}\n`
     ? `\n[POOR-PERFORMING TOPICS — AVOID these, historical data shows they flop]:\n${state.topicBlacklist.map(t => `- ${t}`).join('\n')}\n`
     : "";
 
+  const contrastRecentCount = (state.recentFingerprints ?? [])
+    .slice(-3)
+    .filter(fp => typeof fp === 'string' && fp.includes('CONTRAST'))
+    .length;
+
+  const formatDirectiveBlock = state.formatArchetype
+    ? `---FORMAT DIRECTIVE (MANDATORY)---
+This tweet MUST follow the "${state.formatArchetype.name}" format.
+Structure: ${state.formatArchetype.description}
+Shape hint: ${state.formatArchetype.structureExample}
+The tweet must NOT start with "spent X hours" or any time-struggle opening.
+The tweet must NOT use a contrast-realization arc if the last 3 tweets used one.${contrastRecentCount >= 2 ? '\nHEADS UP: ' + contrastRecentCount + ' of the last 3 tweets already used a contrast-realization arc — avoid it entirely in this draft.' : ''}
+Violating this directive means the draft is invalid.
+---END FORMAT DIRECTIVE---
+
+`
+    : "";
+
   const OWNER_IDENTITY = `You are ${OWNER_PROFILE.identity}
 
 DOMAINS (only write about these):
@@ -384,7 +419,7 @@ ${OWNER_PROFILE.slangs.join(', ')}
 
 NEVER write about: ${OWNER_PROFILE.avoid.join(', ')}.`;
 
-  const personaParameters = `${OWNER_IDENTITY}
+  const personaParameters = `${formatDirectiveBlock}${OWNER_IDENTITY}
 ${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${lengthBlock}${blacklistBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 HOOK RULE: The first 60 characters MUST carry the core claim, punchline, or hook. Never waste the opener on setup or throat-clearing.
@@ -495,18 +530,39 @@ HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fit
 // Budget: worst case +1 LLM call only when duplicate is detected AND rerollCount === 0.
 async function diversityGate(state: typeof AgentState.State) {
   const result = await checkDraftDiversity(state.draft, state.tweetId);
+  const observedFingerprint = extractStructuralFingerprint(state.draft);
+  const composedFingerprint = composeFingerprint(state.formatArchetype?.name ?? null, observedFingerprint);
+
   if (!result.duplicate) {
-    logger.info({ maxSimilarity: result.maxSimilarity }, "Draft passed diversity gate");
+    pushFingerprintToBuffer(composedFingerprint);
+    logger.info({
+      maxSimilarity: result.maxSimilarity,
+      fingerprint: composedFingerprint,
+      sameFingerprintCountInRecent: result.report.sameFingerprintCountInRecent,
+    }, "Draft passed diversity gate");
     return { rerollCount: state.rerollCount ?? 0 };
   }
 
   // Already re-rolled once — accept and move on to avoid infinite loop
   if ((state.rerollCount ?? 0) >= 1) {
-    logger.warn({ maxSimilarity: result.maxSimilarity, matchedTweetId: result.matchedTweetId }, "Draft still near-duplicate after re-roll. Accepting.");
+    pushFingerprintToBuffer(composedFingerprint);
+    logger.warn({
+      rejectionKind: result.report.rejectionKind,
+      maxSimilarity: result.maxSimilarity,
+      matchedTweetId: result.matchedTweetId,
+      matchedFingerprint: result.report.matchedFingerprint,
+      sameFingerprintCountInRecent: result.report.sameFingerprintCountInRecent,
+    }, "Draft still near-duplicate after re-roll. Accepting.");
     return { rerollCount: state.rerollCount };
   }
 
-  logger.warn({ maxSimilarity: result.maxSimilarity, matchedTweetId: result.matchedTweetId }, "Draft near-duplicate. Triggering re-roll.");
+  logger.warn({
+    rejectionKind: result.report.rejectionKind,
+    maxSimilarity: result.maxSimilarity,
+    matchedTweetId: result.matchedTweetId,
+    matchedFingerprint: result.report.matchedFingerprint,
+    sameFingerprintCountInRecent: result.report.sameFingerprintCountInRecent,
+  }, "Draft near-duplicate. Triggering re-roll.");
   return { rerollCount: (state.rerollCount ?? 0) + 1 };
 }
 
