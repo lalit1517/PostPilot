@@ -427,9 +427,11 @@ If you are using the provided `workflows.json`, you must perform these manual st
 
 > [!IMPORTANT]
 > **Recommended**
+>
 > Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
 >
 > **Why?**
+>
 > With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
 
 *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
@@ -438,7 +440,6 @@ If you are using the provided `workflows.json`, you must perform these manual st
 
 
 2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
-
 
     *   `🚀 Open in X` — URL: `{{ $json.body.intentUrl }}` (Expression)
 
@@ -529,7 +530,6 @@ Optional Telegram alerts for LLM budget (≥80%) and worker failures — see [gr
 ## 🚢 Deployment
 
 PostPilot is optimized for the **Render Free Tier**, utilizing a monolith architecture to keep the server and background worker running in a single process.
-
 ### Render (Recommended Free Tier)
 
 1. **Create Web Service**: Connect your GitHub repository to Render.
@@ -546,7 +546,6 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
 > [!TIP]
 > **Pro Tip**: If your n8n workflow uses the `workflows.json` export, ensure the **HTTP Request** nodes have a timeout set to **120 seconds** (120000ms). This gives Render enough time to "wake up" your service from a cold start if the keep-alive pinger hasn't triggered recently.
-
 ### 24/7 Keep-Alive (UptimeRobot)
 
 
