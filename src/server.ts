@@ -636,18 +636,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
     const chatId = callback_query.message.chat.id;
     const [action, tweetId, token] = (callback_query.data || "").split(':');
 
-    // Handle noop actions (e.g. from buttons that are already clicked or status labels)
-    if (action === 'noop') {
-      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callback_query_id: callback_query.id })
-      }).catch(err => logger.warn({ err: (err as Error).message }, 'Failed to answer noop callback'));
-      return res.sendStatus(200);
-    }
-
     if (!tweetId || !token || !verifyToken(tweetId, token)) {
-      logger.warn({ action, tweetId, hasToken: !!token }, 'Invalid token in Telegram callback');
       return res.status(403).json({ error: "Invalid token" });
     }
 
@@ -682,44 +671,19 @@ app.post('/api/telegram/webhook', async (req, res) => {
       const messageId = callback_query.message.message_id;
       const baseUrl = process.env.BASE_URL || '';
       const postedToken = generateToken(tweetId);
-      
       const updatedKeyboard = {
         inline_keyboard: [
           [{ text: "🚀 Open in X", url: tweet.intent_url || 'https://twitter.com' }],
           [{ text: "✏️ Edit Topic", url: `${baseUrl}/api/view-edit?id=${tweetId}&token=${postedToken}` }],
           [{ text: "💬 Feedback", url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}` }],
-          [
-            { text: "✅ Marked as Posted", callback_data: "noop" }, 
-            { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }
-          ],
+          [{ text: "✅ Marked as Posted", callback_data: "noop" }, { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }],
         ],
       };
-
-      try {
-        const editRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            chat_id: chatId, 
-            message_id: messageId, 
-            reply_markup: updatedKeyboard 
-          }),
-        });
-
-        if (!editRes.ok) {
-          const errorBody = await editRes.text();
-          logger.warn({ 
-            status: editRes.status, 
-            error: errorBody,
-            chatId,
-            messageId
-          }, 'Telegram editMessageReplyMarkup failed');
-        } else {
-          logger.info({ tweetId, messageId }, 'Telegram message mutated successfully');
-        }
-      } catch (err) {
-        logger.error({ err: (err as Error).message }, 'Network error while editing Telegram message');
-      }
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: JSON.stringify(updatedKeyboard) }),
+      }).catch(err => logger.warn({ err: (err as Error).message }, 'Failed to edit Telegram message markup'));
     } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
       await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
@@ -920,7 +884,7 @@ app.get('/api/post-intent', async (req, res) => {
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
-  
+
   // Start the background worker process after the port is open
   runWorker();
 
