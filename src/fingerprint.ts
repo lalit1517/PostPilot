@@ -62,3 +62,37 @@ export function appendFingerprint(content: string, invisibleFingerprint: string)
   // Append after a regular space to make sure it doesn't mess with final characters
   return content.trim() + ' ' + invisibleFingerprint;
 }
+
+/**
+ * Extracts the invisible fingerprint from a tweet string (if any),
+ * returning the original hex value. Returns null if not found.
+ */
+export function extractFingerprintHex(tweetContent: string): string | null {
+  const invisibleChars = Object.keys(REVERSE_MAP);
+  let binaryStr = '';
+  
+  for (let i = 0; i < tweetContent.length; i++) {
+    const char = tweetContent.charAt(i);
+    if (invisibleChars.includes(char)) {
+      binaryStr += REVERSE_MAP[char];
+    }
+  }
+
+  if (binaryStr.length === 0) return null;
+
+  // Ensure it's a multiple of 4
+  if (binaryStr.length % 4 !== 0) {
+    // Attempt to slice it or pad it? Usually a match will be exactly 32 bits if not tampered
+    // Let's just try to parse what we can
+    const remainder = binaryStr.length % 4;
+    binaryStr = binaryStr.slice(0, binaryStr.length - remainder);
+  }
+
+  let hexStr = '';
+  for (let i = 0; i < binaryStr.length; i += 4) {
+    const nibble = binaryStr.substring(i, i + 4);
+    hexStr += parseInt(nibble, 2).toString(16);
+  }
+
+  return hexStr !== '' ? hexStr : null;
+}
