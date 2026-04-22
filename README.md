@@ -338,7 +338,6 @@ X_USERNAME=your_handle                 # X handle for tweet resolution scraping
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
 TELEGRAM_BOT_TOKEN=...                 # From @BotFather
-TELEGRAM_CHAT_ID=...                   # Your Telegram chat ID (get from @userinfobot)
 TELEGRAM_WEBHOOK_SECRET=...            # Secret token for Telegram webhook verification (see below)
 N8N_WEBHOOK_URL=https://...            # n8n webhook URL for draft-ready callbacks
 INTERNAL_API_KEY=...                   # API key protecting admin + generate endpoints (see below)
