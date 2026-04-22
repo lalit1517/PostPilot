@@ -202,11 +202,13 @@ async function processWorkerTick(): Promise<boolean> {
         status: 'PENDING',
         process_after: { lte: new Date() }
       },
-      take: 10,
+      take: 3,
       orderBy: { created_at: 'asc' }
     });
 
     for (const task of tasks) {
+
+      await new Promise(r => setTimeout(r, 200));
       const payload = task.payload as any;
 
       await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PROCESSING' } });
