@@ -176,61 +176,93 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
 
 // Track last reweight time in-memory (6h gate)
 let lastReweightAt = 0;
+let workerStarted = false;
+let workerTickRunning = false;
+let workerDelayMs = 10_000;
+
+const BASE_WORKER_DELAY_MS = 10_000;
+const MAX_WORKER_DELAY_MS = 5 * 60_000;
+
+async function processWorkerTick(): Promise<boolean> {
+  try {
+    // 6-hour feedback reweight check
+    const sixHoursMs = 6 * 60 * 60_000;
+    if (Date.now() - lastReweightAt >= sixHoursMs) {
+      try {
+        await reweightFeedback();
+        lastReweightAt = Date.now();
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error({ err: message }, "Scheduled reweightFeedback failed");
+      }
+    }
+
+    const tasks = await prisma.retryQueue.findMany({
+      where: {
+        status: 'PENDING',
+        process_after: { lte: new Date() }
+      },
+      take: 10,
+      orderBy: { created_at: 'asc' }
+    });
+
+    for (const task of tasks) {
+      const payload = task.payload as any;
+
+      await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PROCESSING' } });
+
+      try {
+        if (task.task_type === "RESOLVE_TWEET") {
+          await resolveTweetAfterPost(payload.tweetId, payload.username, task.attempts);
+        } else if (task.task_type === "FETCH_ENGAGEMENT") {
+          await fetchTweetEngagement(payload.tweetId, task.attempts, payload.username);
+        } else if (task.task_type === "EVOLVE_PERSONA") {
+          await evolvePersona();
+        }
+        await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        logger.error({ id: task.id, err: message }, "Task processing failed");
+        if (task.attempts >= task.max_retries) {
+          await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: message } });
+        } else {
+          await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PENDING', attempts: task.attempts + 1 } });
+        }
+      }
+    }
+    return true;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.error({ err: message, retryInMs: workerDelayMs }, "Worker loop error");
+    return false;
+  }
+}
+
+async function scheduledWorkerTick() {
+  if (workerTickRunning) {
+    logger.warn("Worker tick skipped because previous tick is still running");
+    setTimeout(() => void scheduledWorkerTick(), workerDelayMs);
+    return;
+  }
+
+  workerTickRunning = true;
+  const ok = await processWorkerTick();
+  workerTickRunning = false;
+
+  workerDelayMs = ok
+    ? BASE_WORKER_DELAY_MS
+    : Math.min(workerDelayMs * 2, MAX_WORKER_DELAY_MS);
+
+  setTimeout(() => void scheduledWorkerTick(), workerDelayMs);
+}
 
 // Background scheduler
-export async function runWorker() {
-  setInterval(async () => {
-    try {
-      // 6-hour feedback reweight check
-      const sixHoursMs = 6 * 60 * 60_000;
-      if (Date.now() - lastReweightAt >= sixHoursMs) {
-        try {
-          await reweightFeedback();
-          lastReweightAt = Date.now();
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          logger.error({ err: message }, "Scheduled reweightFeedback failed");
-        }
-      }
-
-      const tasks = await prisma.retryQueue.findMany({
-        where: {
-          status: 'PENDING',
-          process_after: { lte: new Date() }
-        },
-        take: 10,
-        orderBy: { created_at: 'asc' }
-      });
-
-      for (const task of tasks) {
-        const payload = task.payload as any;
-
-        await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PROCESSING' } });
-
-        try {
-          if (task.task_type === "RESOLVE_TWEET") {
-            await resolveTweetAfterPost(payload.tweetId, payload.username, task.attempts);
-          } else if (task.task_type === "FETCH_ENGAGEMENT") {
-            await fetchTweetEngagement(payload.tweetId, task.attempts, payload.username);
-          } else if (task.task_type === "EVOLVE_PERSONA") {
-            await evolvePersona();
-          }
-          await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
-        } catch (e: unknown) {
-          const message = e instanceof Error ? e.message : String(e);
-          logger.error({ id: task.id, err: message }, "Task processing failed");
-          if (task.attempts >= task.max_retries) {
-            await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: message } });
-          } else {
-            await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PENDING', attempts: task.attempts + 1 } });
-          }
-        }
-      }
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : String(e);
-      logger.error({ err: message }, "Worker loop error");
-    }
-  }, 10000);
+export function runWorker(): boolean {
+  if (workerStarted) return false;
+  workerStarted = true;
+  logger.info({ intervalMs: BASE_WORKER_DELAY_MS }, "Worker scheduler started");
+  void scheduledWorkerTick();
+  return true;
 }
 
 export async function fetchTweetEngagement(tweetId: string, attempt: number, username: string) {

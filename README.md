@@ -328,10 +328,10 @@ npm install
 Create `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true
-                                       # Supabase transaction pooler (port 6543) + pgbouncer=true for Prisma compatibility
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=5&pool_timeout=20
+                                       # Supabase transaction pooler (port 6543) for Prisma runtime
 DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
-                                       # Supabase direct connection (port 5432) — required for Prisma migrations
+                                       # Supabase session pooler (port 5432) for Prisma migrations; no pgbouncer query param
 GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/app/apikey
                                        # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
@@ -348,7 +348,7 @@ GRAFANA_URL=https://yourorg.grafana.net  # Grafana Cloud stack URL (for dashboar
 GRAFANA_API_KEY=...                    # Grafana service account token with Admin role (see grafana/README.md)
 
 GRAFANA_DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
-                                       # Supabase session pooler (port 5432) for Grafana — stable for long-running analytical queries
+                                       # Supabase session pooler (port 5432) for Grafana
 ```
 
 Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex):
@@ -534,11 +534,12 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
 1. **Create Web Service**: Connect your GitHub repository to Render.
 2. **Build Command**: `npm run build` (runs `prisma generate`).
-3. **Start Command**: `npm start` (automatically runs migrations, provisions Grafana, and starts the server + worker).
-4. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
+3. **Start Command**: `npm start` (starts the server + in-process worker only).
+4. **Release Command**: run `npm run release` before deploying, or run `npm run migrate` and `npm run provision:grafana` manually when needed.
+5. **Environment Variables**:
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=5&pool_timeout=20`.
 
-   - `DIRECT_URL`: Direct Connection (Port 5432) — **Required** for migrations.
+   - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param.
 
    - `BASE_URL`: Your Render dashboard URL (e.g., `https://<your-app-name>.onrender.com`).
 
@@ -574,9 +575,11 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | Command | Description |
 | :--- | :--- |
 | `npm run dev` | Start API server in watch mode (nodemon) |
-| `npm start` | Start API server (production) |
-| `npm run worker` | Start background task processor |
-| `npx prisma migrate deploy` | Apply pending migrations to database |
+| `npm start` | Start API server and in-process worker (production) |
+| `npm run worker` | Start only the background task processor |
+| `npm run migrate` | Apply pending migrations to database |
+| `npm run provision:grafana` | Provision Grafana datasource and dashboards |
+| `npm run release` | Run migrations, then provision Grafana |
 | `npx prisma migrate dev --name <name>` | Create and apply a new migration |
 | `npx prisma generate` | Regenerate Prisma client types |
 
