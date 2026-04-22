@@ -328,7 +328,7 @@ npm install
 Create `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=5&pool_timeout=20
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=20&pool_timeout=20
                                        # Supabase transaction pooler (port 6543) for Prisma runtime
 DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
                                        # Supabase session pooler (port 5432) for Prisma migrations; no pgbouncer query param
@@ -534,10 +534,10 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
 1. **Create Web Service**: Connect your GitHub repository to Render.
 2. **Build Command**: `npm run build` (runs `prisma generate`).
-3. **Start Command**: `npm start` (starts the server + in-process worker only).
-4. **Release Command**: run `npm run release` before deploying, or run `npm run migrate` and `npm run provision:grafana` manually when needed.
+3. **Start Command**: `npm start` (runs migrations, provisions Grafana, then starts the server + in-process worker).
+4. **Manual Release Command**: run `npm run release` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=5&pool_timeout=20`.
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
 
    - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param.
 
@@ -575,7 +575,7 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | Command | Description |
 | :--- | :--- |
 | `npm run dev` | Start API server in watch mode (nodemon) |
-| `npm start` | Start API server and in-process worker (production) |
+| `npm start` | Run release tasks, then start API server and in-process worker |
 | `npm run worker` | Start only the background task processor |
 | `npm run migrate` | Apply pending migrations to database |
 | `npm run provision:grafana` | Provision Grafana datasource and dashboards |
