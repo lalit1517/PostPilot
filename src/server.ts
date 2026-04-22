@@ -676,7 +676,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
           [{ text: "🚀 Open in X", url: tweet.intent_url || 'https://twitter.com' }],
           [{ text: "✏️ Edit Topic", url: `${baseUrl}/api/view-edit?id=${tweetId}&token=${postedToken}` }],
           [{ text: "💬 Feedback", url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}` }],
-          [{ text: "✅ Marked as Posted", callback_data: "noop" }, { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }],
+          [{ text: "✅ Marked as Posted", callback_data: "noop" }],
         ],
       };
       const editMarkupRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
