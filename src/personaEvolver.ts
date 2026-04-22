@@ -63,6 +63,10 @@ ${currentProfile?.profile_text ?? 'No prior persona. Start fresh.'}
 TOP PERFORMING POSTS (sorted by outcome score, highest first):
 ${highTierTweets.map((t, i) => `${i + 1}. [Score: ${t.outcome.outcome_score.toFixed(1)}] "${t.content}"`).join('\n')}
 
+STRUCTURE DIVERSITY AUDIT:
+Count how many of the above posts share the same opening pattern (e.g. "spent X hours/minutes", "just shipped", "everyone says"). If more than 2 out of 10 share the same opening, explicitly list that pattern under the AVOID section of the persona, labeled as "OVERUSED_STRUCTURE: [pattern]". The goal is high engagement AND structural variety. Do not encode structural habits that appear in 3+ posts — those are ruts, not style.
+Also audit narrative arcs: if 3+ posts share the same arc (e.g. "struggle -> realization -> quip", "setup -> contrast -> lesson", "rant -> self-deprecation"), list that arc under AVOID as "OVERUSED_ARC: [description]" too.
+
 TASK: Produce an updated persona profile document for a builder on X.
 Extract: (1) sentence structures that recur in top posts, (2) vocabulary patterns, (3) topic angles that performed well, (4) what to avoid based on low performers.
 
@@ -71,6 +75,8 @@ If you notice the top posts using formal/literary language, DO NOT copy that pat
 The SIGNATURE_PHRASES section must only contain phrases a real 23-year-old would say, not a novelist.
 Never include words like "indeed", "thus", "upon", "whilst", "amidst", "behold", "henceforth" in the profile.
 No metaphors about journeys, battles, or nature. No philosophical framing.
+
+CRITICAL: The SIGNATURE_PHRASES section must ONLY include sentence-level constructions that appear in FEWER than 3 of the top posts. Anything appearing in 3+ posts is a crutch, not a signature. List it under AVOID instead, labeled as "OVERUSED_PHRASE: [phrase]".
 
 Output ONLY the persona document. Plain text. Under 400 words. No preamble.
 Structure it with these exact section headers on their own lines:
