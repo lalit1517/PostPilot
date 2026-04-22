@@ -679,15 +679,11 @@ app.post('/api/telegram/webhook', async (req, res) => {
           [{ text: "✅ Marked as Posted", callback_data: "noop" }, { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }],
         ],
       };
-      const editMarkupRes = await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
+      await fetch(`https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: updatedKeyboard }),
-      }).catch(err => { logger.warn({ err: (err as Error).message }, 'editMessageReplyMarkup network error'); return null; });
-      if (editMarkupRes && !editMarkupRes.ok) {
-        const errBody = await editMarkupRes.text();
-        logger.warn({ status: editMarkupRes.status, body: errBody }, 'editMessageReplyMarkup failed');
-      }
+        body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: JSON.stringify(updatedKeyboard) }),
+      }).catch(err => logger.warn({ err: (err as Error).message }, 'Failed to edit Telegram message markup'));
     } else if (action === 'ct' || action === 'copy_tweet') {
       const content = tweet.versions[0]?.content || "No content found";
       await sendTelegramMessage(chatId, `📋 **Copy & Paste this:**\n\n\`${content}\``);
