@@ -1,5 +1,6 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
+import { extractFingerprintHex } from './fingerprint.js';
 import { computeOutcomeScore } from './outcomeScorer.js';
 import { reweightFeedback } from './feedbackWeighter.js';
 import { evolvePersona } from './personaEvolver.js';
@@ -35,7 +36,7 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
         failedFetches++;
         logger.warn({ tweetId, tryNum, err: err.message }, "Single poll attempt failed");
       }
-
+      
       if (tryNum < 5 && !found) {
         await new Promise(r => setTimeout(r, getJitterDelay(4000)));
       }
@@ -71,19 +72,6 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
           data: { status: 'RESOLVE_FAILED', posted: false, posted_at: null }
         });
         logger.error({ tweetId }, "Tweet not found after all retries. Marked RESOLVE_FAILED — fingerprint destroyed or tweet never posted.");
-        const chatId = process.env.TELEGRAM_CHAT_ID;
-        const botToken = process.env.TELEGRAM_BOT_TOKEN;
-        if (chatId && botToken) {
-          await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              chat_id: chatId,
-              text: `❌ Tweet not found after all retries — marked as *Not Posted*.\n\nTweet ID: \`${tweetId}\`\n\nFingerprint may have been destroyed or tweet was never posted.`,
-              parse_mode: 'Markdown'
-            })
-          }).catch(err => logger.warn({ err: (err as Error).message }, 'Failed to send RESOLVE_FAILED Telegram notification'));
-        }
       }
     }
   } catch (error: any) {
@@ -142,36 +130,36 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
 }
 
 function checkHtmlForFingerprint(content: string, fingerprint: string, username: string) {
-  // A primitive check:
-  // Since fingerprint zeroes/ones map to \u200B and \u200C, let's rebuild the invisible string to search exactly.
-  const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
-  let invisibleSuffix = '';
-  for (let i = 0; i < fingerprint.length; i++) {
-    const hexDigit = fingerprint.charAt(i);
-    const binary = parseInt(hexDigit, 16).toString(2).padStart(4, '0');
-    for (let j = 0; j < binary.length; j++) {
-      invisibleSuffix += INVISIBLE_MAP[binary.charAt(j)];
+    // A primitive check:
+    // Since fingerprint zeroes/ones map to \u200B and \u200C, let's rebuild the invisible string to search exactly.
+    const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
+    let invisibleSuffix = '';
+    for (let i = 0; i < fingerprint.length; i++) {
+      const hexDigit = fingerprint.charAt(i);
+      const binary = parseInt(hexDigit, 16).toString(2).padStart(4, '0');
+      for (let j = 0; j < binary.length; j++) {
+        invisibleSuffix += INVISIBLE_MAP[binary.charAt(j)];
+      }
     }
-  }
 
-  if (content.indexOf(invisibleSuffix) !== -1) {
-    // Match found! We need the tweet ID.
-    // We can do a rudimentary regex around the invisible match to find status ID.
-    // E.g. searching for `status/1234567890` nearby.
-    const matchIndex = content.indexOf(invisibleSuffix);
-    const snippet = content.substring(Math.max(0, matchIndex - 1000), matchIndex + 1000);
-
-    // Find /status/12345...
-    const statusRegex = new RegExp(`/${username}/status/(\\d+)`, 'i');
-    const m = snippet.match(statusRegex);
-    if (m && m[1]) {
-      return {
-        tweetId: m[1],
-        url: `https://twitter.com/${username}/status/${m[1]}`
-      };
+    if (content.indexOf(invisibleSuffix) !== -1) {
+        // Match found! We need the tweet ID.
+        // We can do a rudimentary regex around the invisible match to find status ID.
+        // E.g. searching for `status/1234567890` nearby.
+        const matchIndex = content.indexOf(invisibleSuffix);
+        const snippet = content.substring(Math.max(0, matchIndex - 1000), matchIndex + 1000);
+        
+        // Find /status/12345...
+        const statusRegex = new RegExp(`/${username}/status/(\\d+)`, 'i');
+        const m = snippet.match(statusRegex);
+        if (m && m[1]) {
+            return {
+                tweetId: m[1],
+                url: `https://twitter.com/${username}/status/${m[1]}`
+            };
+        }
     }
-  }
-  return null;
+    return null;
 }
 
 export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date) {
@@ -246,100 +234,100 @@ export async function runWorker() {
 }
 
 export async function fetchTweetEngagement(tweetId: string, attempt: number, username: string) {
-  const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
-  if (!tweet || !tweet.x_tweet_id) return;
+   const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
+   if (!tweet || !tweet.x_tweet_id) return;
+   
+   // Avoid duplicates: Check if we have a record within the last 5 minutes
+   const recentEngagement = await prisma.engagement.findFirst({
+     where: { 
+       tweet_id: tweetId,
+       fetched_at: { gte: new Date(Date.now() - 5 * 60 * 1000) }
+     }
+   });
 
-  // Avoid duplicates: Check if we have a record within the last 5 minutes
-  const recentEngagement = await prisma.engagement.findFirst({
-    where: {
-      tweet_id: tweetId,
-      fetched_at: { gte: new Date(Date.now() - 5 * 60 * 1000) }
-    }
-  });
+   if (recentEngagement) {
+     logger.info({ tweetId }, "Skipping engagement fetch: minimum gap not met");
+     return;
+   }
 
-  if (recentEngagement) {
-    logger.info({ tweetId }, "Skipping engagement fetch: minimum gap not met");
-    return;
-  }
-
-  logger.info({ tweetId, attempt }, "Fetching tracking engagement...");
-
-  try {
-    const res = await fetch(`https://cdn.syndication.twimg.com/tweet-result?id=${tweet.x_tweet_id}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
-      },
-      signal: AbortSignal.timeout(7000)
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-
-      // Validate response structure before parsing
-      if (!data || typeof data !== 'object') {
-        throw new Error("Engagement source returned invalid object");
-      }
-
-      const likes = Number(data?.favorite_count || 0);
-      const retweets = Number((data?.retweet_count || 0) + (data?.quote_count || 0));
-
-      // Every fetch should INSERT a new row
-      await prisma.engagement.create({
-        data: {
-          tweet_id: tweetId,
-          likes,
-          retweets,
-          fetched_at: new Date()
-        }
+   logger.info({ tweetId, attempt }, "Fetching tracking engagement...");
+   
+    try {
+      const res = await fetch(`https://cdn.syndication.twimg.com/tweet-result?id=${tweet.x_tweet_id}`, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json'
+        },
+        signal: AbortSignal.timeout(7000)
       });
 
-      logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
-
-      // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
-      let nextFetchDelay = 0;
-      if (attempt === 1) nextFetchDelay = 50 * 60 * 1000; // 10m + 50m = 1h
-      else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
-      else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
-      else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
-
-      if (attempt === 5) {
-        // Final snapshot (72h) — close the engagement loop
-        try {
-          await computeOutcomeScore(tweetId);
-          await reweightFeedback();
-
-          // Check if 5+ new high-tier tweets exist since last persona evolution
-          const lastEvolution = await prisma.personaProfile.findFirst({
-            orderBy: { created_at: 'desc' },
-            select: { created_at: true },
-          });
-          const sinceDate = lastEvolution?.created_at ?? new Date(0);
-          const highTierCount = await prisma.tweetOutcome.count({
-            where: { tier: 'high', computed_at: { gt: sinceDate } },
-          });
-
-          if (highTierCount >= 5) {
-            await enqueueRetry("EVOLVE_PERSONA", {}, 1);
-            logger.info({ highTierCount }, "Enqueued EVOLVE_PERSONA task");
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          logger.error({ tweetId, err: message }, "Post-engagement scoring/evolution failed");
+      if (res.ok) {
+        const data = await res.json();
+        
+        // Validate response structure before parsing
+        if (!data || typeof data !== 'object') {
+          throw new Error("Engagement source returned invalid object");
         }
-      } else if (nextFetchDelay > 0) {
-        const jitteredNextDelay = getJitterDelay(nextFetchDelay);
-        const nextFetchDate = new Date(Date.now() + jitteredNextDelay);
-        await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
-        logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
-      }
 
-    } else {
-      logger.warn({ tweetId, status: res.status, attempt }, "Failed to fetch engagement from source");
-      throw new Error(`Source returned status ${res.status}`);
+        const likes = Number(data?.favorite_count || 0);
+        const retweets = Number((data?.retweet_count || 0) + (data?.quote_count || 0));
+
+        // Every fetch should INSERT a new row
+        await prisma.engagement.create({
+          data: {
+            tweet_id: tweetId,
+            likes,
+            retweets,
+            fetched_at: new Date()
+          }
+        });
+
+        logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
+
+        // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
+        let nextFetchDelay = 0;
+        if (attempt === 1) nextFetchDelay = 50 * 60 * 1000; // 10m + 50m = 1h
+        else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
+        else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
+        else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
+
+        if (attempt === 5) {
+          // Final snapshot (72h) — close the engagement loop
+          try {
+            await computeOutcomeScore(tweetId);
+            await reweightFeedback();
+
+            // Check if 5+ new high-tier tweets exist since last persona evolution
+            const lastEvolution = await prisma.personaProfile.findFirst({
+              orderBy: { created_at: 'desc' },
+              select: { created_at: true },
+            });
+            const sinceDate = lastEvolution?.created_at ?? new Date(0);
+            const highTierCount = await prisma.tweetOutcome.count({
+              where: { tier: 'high', computed_at: { gt: sinceDate } },
+            });
+
+            if (highTierCount >= 5) {
+              await enqueueRetry("EVOLVE_PERSONA", {}, 1);
+              logger.info({ highTierCount }, "Enqueued EVOLVE_PERSONA task");
+            }
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            logger.error({ tweetId, err: message }, "Post-engagement scoring/evolution failed");
+          }
+        } else if (nextFetchDelay > 0) {
+          const jitteredNextDelay = getJitterDelay(nextFetchDelay);
+          const nextFetchDate = new Date(Date.now() + jitteredNextDelay);
+          await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
+          logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
+        }
+
+      } else {
+        logger.warn({ tweetId, status: res.status, attempt }, "Failed to fetch engagement from source");
+        throw new Error(`Source returned status ${res.status}`);
+      }
+    } catch (error: any) {
+      logger.error({ tweetId, err: error.message, attempt }, "Engagement fetch failed.");
+      throw error;
     }
-  } catch (error: any) {
-    logger.error({ tweetId, err: error.message, attempt }, "Engagement fetch failed.");
-    throw error;
-  }
 }
