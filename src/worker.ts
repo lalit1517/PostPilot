@@ -189,26 +189,9 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
 // Track last reweight time in-memory (6h gate)
 let lastReweightAt = 0;
 
-// Overlap guard — prevent concurrent worker ticks from stacking DB queries
-let tickInFlight = false;
-
-// Backoff state — grow poll interval when DB is unreachable
-const BASE_INTERVAL_MS = 10_000;
-const MAX_INTERVAL_MS = 120_000;
-let currentInterval = BASE_INTERVAL_MS;
-
-function isDbUnreachableError(msg: string): boolean {
-  return msg.includes("Can't reach database server") || msg.includes("connection pool");
-}
-
 // Background scheduler
 export async function runWorker() {
-  const tick = async () => {
-    if (tickInFlight) {
-      setTimeout(tick, currentInterval);
-      return;
-    }
-    tickInFlight = true;
+  setInterval(async () => {
     try {
       // 6-hour feedback reweight check
       const sixHoursMs = 6 * 60 * 60_000;
@@ -255,22 +238,11 @@ export async function runWorker() {
           }
         }
       }
-      // Successful tick — reset backoff
-      currentInterval = BASE_INTERVAL_MS;
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      if (isDbUnreachableError(message)) {
-        currentInterval = Math.min(currentInterval * 2, MAX_INTERVAL_MS);
-        logger.error({ err: message, nextPollMs: currentInterval }, "Worker loop DB error — backing off");
-      } else {
-        logger.error({ err: message }, "Worker loop error");
-      }
-    } finally {
-      tickInFlight = false;
-      setTimeout(tick, currentInterval);
+      logger.error({ err: message }, "Worker loop error");
     }
-  };
-  setTimeout(tick, currentInterval);
+  }, 10000);
 }
 
 export async function fetchTweetEngagement(tweetId: string, attempt: number, username: string) {

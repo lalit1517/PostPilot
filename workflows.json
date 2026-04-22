@@ -77,7 +77,7 @@
     },
     {
       "parameters": {
-        "chatId": "={{ $env.TELEGRAM_CHAT_ID }}",
+        "chatId": "{{CHAT_ID}}",
         "text": "=🚀 <b>New X Post Draft - {{ $json.body.topic }}</b>\n---\n<b>Draft:</b>\n<pre><code>{{ $json.body.htmlDraft || $json.body.draft }}</code></pre>\n\n<b>Time:</b> {{ $json.body.time_of_day || 'Not set' }}\n<b>Score:</b> {{ $json.body.score || 0 }}/10\n---",
         "additionalFields": {
           "parse_mode": "HTML",
