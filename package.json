@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "tsx src/server.ts",
+    "start": "npm run release && tsx src/server.ts",
     "worker": "tsx src/worker-entry.ts",
     "dev": "nodemon -w src --ext ts --exec tsx src/server.ts",
     "migrate": "npx prisma@6.4.1 migrate deploy",
