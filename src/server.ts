@@ -145,6 +145,25 @@ app.get('/', (req, res) => {
   });
 });
 
+app.get('/health/db', async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({
+      status: 'ok',
+      db: 'ok',
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Database health check failed');
+    res.status(503).json({
+      status: 'degraded',
+      db: 'unreachable',
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
 const HMAC_SECRET = process.env.HMAC_SECRET as string;
 if (!HMAC_SECRET) {
   throw new Error("Missing HMAC_SECRET in environment variables");
@@ -881,12 +900,36 @@ app.get('/api/post-intent', async (req, res) => {
   res.redirect(intentUrl);
 });
 
+let workerStartDelayMs = 10_000;
+let workerStartTimer: NodeJS.Timeout | null = null;
+
+async function startWorkerWhenDbReady() {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    const started = runWorker();
+    if (started) {
+      logger.info("Worker started after successful database check");
+    }
+    if (workerStartTimer) {
+      clearTimeout(workerStartTimer);
+      workerStartTimer = null;
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message, retryInMs: workerStartDelayMs }, "Database unavailable; worker start delayed");
+    workerStartTimer = setTimeout(() => {
+      workerStartDelayMs = Math.min(workerStartDelayMs * 2, 5 * 60_000);
+      void startWorkerWhenDbReady();
+    }, workerStartDelayMs);
+  }
+}
+
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
   
-  // Start the background worker process after the port is open
-  runWorker();
+  // Start the background worker only after the database accepts a query.
+  void startWorkerWhenDbReady();
 
   console.log(`📍 [URL] ${process.env.BASE_URL || 'http://localhost:3000'}`);
 

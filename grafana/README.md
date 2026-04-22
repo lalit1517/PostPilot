@@ -18,7 +18,7 @@ All panels query your Supabase DB directly — zero data retention limits, full 
 
 - Node.js 20+
 - [Grafana Cloud](https://grafana.com/products/cloud/) free account (sign up takes 2 minutes)
-- PostPilot `.env` configured with `DATABASE_URL`
+- PostPilot `.env` configured with `GRAFANA_DATABASE_URL` or `DATABASE_URL`
 
 ---
 
@@ -146,5 +146,5 @@ It overwrites existing dashboards with the updated JSON. Data source is skipped 
 | `Missing required env var: GRAFANA_URL` | Add `GRAFANA_URL` to `.env` |
 | `401 Unauthorized` from Grafana API | Check `GRAFANA_API_KEY` — must be a service account token with Editor role |
 | Data source created but panels show "no data" | Supabase is blocking Grafana IPs — see Step 3 |
-| `password authentication failed` | Verify `DATABASE_URL` uses the transaction pooler URL (port 5432), not the direct connection |
+| `password authentication failed` | Verify `GRAFANA_DATABASE_URL` uses the Supabase session pooler URL (port 5432) |
 | `relation "Tweet" does not exist` | Prisma table names are double-quoted and case-sensitive — ensure the SQL in panels uses `"Tweet"` not `tweet` |
