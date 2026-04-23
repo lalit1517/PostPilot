@@ -216,6 +216,29 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     let tweetDraft = finalState.draft;
     const finalTopic = finalState.topic;
 
+    // Short-circuit: graph signaled rate-limit exhaustion. Skip webhook + post-graph
+    // diversity check entirely; mark tweet for manual retry and notify Telegram.
+    if (finalState.rateLimited) {
+      logger.warn({ tweetId }, 'Generation rate-limited; marking tweet and notifying Telegram');
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: 'GENERATION_RATE_LIMITED' },
+      });
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        try {
+          await sendTelegramMessage(
+            chatId,
+            `⚠️ *Generation skipped* — Gemini quota exhausted.\nTweet \`${tweetId}\` marked as \`GENERATION_RATE_LIMITED\`.\nRetry after quota resets (~24h) or enable billing.`
+          );
+        } catch (tgErr: unknown) {
+          const m = tgErr instanceof Error ? tgErr.message : String(tgErr);
+          logger.warn({ tweetId, err: m }, 'Failed to notify Telegram about rate-limit');
+        }
+      }
+      return;
+    }
+
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
 
     const diversity = await checkDraftDiversity(tweetDraft, tweetId);
