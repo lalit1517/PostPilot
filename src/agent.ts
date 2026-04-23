@@ -38,6 +38,9 @@ const AgentState = Annotation.Root({
   rerollCount: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
   formatArchetype: Annotation<FormatArchetype | null>({ reducer: (x, y) => y ?? x, default: () => null }),
   recentFingerprints: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
+  // Set to true by contentGenerator when the LLM call was blocked by canCallLLM().
+  // Short-circuits the rest of the graph and signals server.ts to skip webhook.
+  rateLimited: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
 });
 
 // ✅ FIX 1: Temperature lowered to 1.3 (safe, still creative)
@@ -499,11 +502,12 @@ HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fit
   try {
     const { allowed, reason } = await canCallLLM();
     if (!allowed) {
-      logger.warn({ reason }, "LLM rate limit reached in contentGenerator, using fallback");
+      logger.warn({ reason }, "LLM rate limit reached in contentGenerator, short-circuiting graph");
       return {
-        topic: state.topic || "General Update",
-        draft: "still shipping. no updates, just commits.",
-        iterationCount: 1
+        topic: state.topic || "Rate Limited",
+        draft: "",
+        iterationCount: 1,
+        rateLimited: true,
       };
     }
     await recordLLMCall("gemini-2.5-flash", "generate");
@@ -575,6 +579,15 @@ async function diversityGate(state: typeof AgentState.State) {
     sameFingerprintCountInRecent: result.report.sameFingerprintCountInRecent,
   }, "Draft near-duplicate. Triggering re-roll.");
   return { rerollCount: (state.rerollCount ?? 0) + 1 };
+}
+
+// Router after contentGenerator: skip the rest of the graph when rate-limited.
+function afterContentGenerator(state: typeof AgentState.State): "diversityGate" | typeof END {
+  if (state.rateLimited) {
+    logger.warn("Rate-limited; skipping diversityGate and qualityScorer");
+    return END;
+  }
+  return "diversityGate";
 }
 
 // Router: send duplicates back to contentGenerator EXACTLY ONCE.
@@ -712,7 +725,7 @@ const workflow = new StateGraph(AgentState)
   .addEdge(START, "contextLoader")
   .addEdge("contextLoader", "personaAdapter")
   .addEdge("personaAdapter", "contentGenerator")
-  .addEdge("contentGenerator", "diversityGate")
+  .addConditionalEdges("contentGenerator", afterContentGenerator)
   .addConditionalEdges("diversityGate", afterDiversityGate)
   .addConditionalEdges("qualityScorer", shouldRefine)
   .addEdge("autoRefiner", END);
