@@ -19,6 +19,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
   - [3. Set up the database](#3-set-up-the-database)
   - [4. Set up Telegram bot](#4-set-up-telegram-bot)
   - [5. Configure n8n](#5-configure-n8n)
+- [Database Stability](#database-stability)
 - [Safety & Policy Compliance](#safety--policy-compliance)
 - [Hard Constraints](#hard-constraints)
 - [Analytics (Grafana)](#analytics-grafana)
@@ -114,13 +115,15 @@ Generation (3 LLM calls max)
 
 **Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> [autoRefiner if score < 8] -> END`
 
-Re-roll edge: `diversityGate -> contentGenerator` (max once when duplicate detected).
+**Re-roll edge:** `diversityGate -> contentGenerator` (capped at 1 re-roll; accept branch bumps `rerollCount` past the router guard so the graph cannot loop even if downstream nodes fail).
+
+**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, autoRefiner, and the n8n webhook. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
 | `contextLoader` | No | Parallel fetch: top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, Trends24 topics filtered via `OWNER_PROFILE.trendKeywords`, `computeLengthTarget()` (avg±stdev from high-tier outcomes), `computeTopicBlacklist()` (bottom-20% topics), last 15 structural fingerprints, and `getNextFormat()` → assigned `FormatArchetype` for this run. |
 | `personaAdapter` | No | Prepends a `---FORMAT DIRECTIVE (MANDATORY)---` block BEFORE the persona identity so it overrides stylistic habits (archetype name + structure description + shape hint, explicit ban on `spent X hours` openers, dynamic contrast-arc ban when 2+ of last 3 tweets used CONTRAST). Then builds `OWNER_IDENTITY` from module-level `OWNER_PROFILE` (identity, domains, moods, tones, language, experienceVoice, cities, hobbies, slangs, avoid, trendKeywords). Injects few-shot exemplars (top 3 historical tweets), hook-first rule (first 60 chars = core claim), dynamic length target, topic blacklist, tone-by-time-of-day, learned persona, trend hint, recent-topics-to-avoid, feedback guidelines, and a `VOICE ANTI-PATTERNS` guardrail that bans literary/philosophical language, metaphors, passive voice, and filler openers. |
-| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded. Output passed through `finalizeDraft()`. Static fallback if rate-limited. |
+| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded via `canCallLLM()`. Output passed through `finalizeDraft()`. On rate-limit, sets `rateLimited: true` on state and the new `afterContentGenerator` router short-circuits the graph straight to `END` (no diversity check, no scoring, no refining, no webhook). |
 | `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts — either triggers a re-roll. On duplicate, routes back to `contentGenerator` for one re-roll; second duplicate accepted. Accepted drafts push a `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` fingerprint to the 15-slot in-memory ring buffer. Emits a full `DiversityReport` (rejection kind, matched fingerprint, same-fingerprint count in last 20) on every rejection. |
 | `qualityScorer` | Yes | Scores 1-10 via `parseScore()` with explicit voice-authenticity criteria (deducts 2 points for literary/philosophical tone). Runs `parseCritiqueHints()` to convert free-form critique into a structured hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`). Persists `quality_score` to TweetVersion. |
 | `autoRefiner` | Conditional | Rewrites if score < 8. Maps `critiqueHints` to concrete rewrite directives via `HINT_DIRECTIVES` (e.g. `weak_hook` → "REWRITE THE OPENER — first 60 chars must land the core claim"). Output gated by `isSuspiciousDraft()`; rejection keeps original. Skipped at score ≥ 8. |
@@ -291,7 +294,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `ERROR`), fingerprint, live_url, posted_at |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — likes, retweets, impressions at each interval |
@@ -335,10 +338,18 @@ npm install
 Create `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=20&pool_timeout=20
-                                       # Supabase transaction pooler (port 6543) for Prisma runtime
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=7&pool_timeout=20&connect_timeout=15&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
+                                       # Supabase transaction pooler (port 6543) for Prisma runtime.
+                                       # Stability params (ALL required, see src/db.ts comment block):
+                                       #   connection_limit=7            — Supabase free/pro caps upstream conns; 7 is safe
+                                       #   pool_timeout=20               — wait up to 20s for a free pool slot
+                                       #   connect_timeout=15            — boot-time guard against Supavisor cold-start P1001
+                                       #   tcp_keepalives_idle=60        — OS-level TCP keepalive every 60s
+                                       #   tcp_keepalives_interval=10    — probe retry every 10s if idle
+                                       #   tcp_keepalives_count=5        — 5 failed probes = dead socket
 DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
-                                       # Supabase session pooler (port 5432) for Prisma migrations; no pgbouncer query param
+                                       # Supabase session pooler (port 5432) for Prisma migrations; no pgbouncer query param.
+                                       # Username MUST be `postgres.PROJECT_REF` (Supavisor format), not bare `postgres`.
 GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/app/apikey
                                        # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
@@ -439,9 +450,21 @@ If you are using the provided `workflows.json`, you must perform these manual st
 > **Why?**
 > With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
 
-*   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` (look for `rpdCount >= 19`).
+*   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` — see [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits) below.
 
 *   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
+
+### Increasing RPM / RPD Limits
+
+Defaults match the Gemini free tier (5 RPM / 19 RPD with 1-call buffer). Bump the two constants at the top of [`src/rateGuard.ts`](src/rateGuard.ts) to match your tier:
+
+```typescript
+// src/rateGuard.ts:15-16
+const RPM_LIMIT = 5;      // bump to your tier's RPM
+const RPD_LIMIT = 19;     // bump to your tier's RPD (leave 1-call buffer)
+```
+
+When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (skips diversity/scorer/refiner/webhook), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
 
 
 2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
@@ -485,6 +508,16 @@ If you are using the provided `workflows.json`, you must perform these manual st
 
 > [!NOTE]
 > Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
+
+## 🛡️ Database Stability
+
+If you see `P1001`, `P2024`, or "Can't reach database" errors, the three defenses live in [`src/db.ts`](src/db.ts):
+
+1. **Connection-string params** — `connection_limit=7`, `connect_timeout=15`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
+2. **Activity-aware keepalive** — 90s interval, skips pings when real traffic already warms the pool.
+3. **Reconnect middleware + `ensureDbReady()`** — catches `P1001/P1002/P1008/P1017/P2024` + pool-timeout messages; `$disconnect`s to flush zombies and retries once. `ensureDbReady()` probes before `contextLoader`'s parallel burst.
+
+`canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
 
 ## 📊 Analytics (Grafana)
 
@@ -544,9 +577,9 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 3. **Start Command**: `npm start` (runs migrations, then starts the server + in-process worker).
 4. **Dashboard Release Command**: run `npm run release:grafana` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + `?pgbouncer=true&connection_limit=20&pool_timeout=20`.
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=7` (NOT 20) and all five `tcp_keepalives_*` / `connect_timeout` params are required.
 
-   - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param.
+   - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param. Username must be `postgres.PROJECT_REF`.
 
    - `BASE_URL`: Your Render dashboard URL (e.g., `https://<your-app-name>.onrender.com`).
 
@@ -595,13 +628,13 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 
 PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
 
-- **Human-in-the-Loop (HITL)**: By separating *intelligence* (AI drafting) from *action* (manual posting), you remain a "regular user" in the eyes of X. You never hand over your account credentials to an automated script for posting.
+- **Human-in-the-Loop (HITL)**: AI drafts, you post. No account credentials ever handed to an automated script — you stay a regular user in X's eyes.
 
-- **Invisible Fingerprinting**: We use zero-width Unicode characters (`U+200B`/`U+200C`) to link drafts to real-world engagement. This allows the system to learn from performance without using the Official X API and without cluttering your tweets with visible tracking IDs.
+- **Invisible Fingerprinting**: Zero-width Unicode (`U+200B`/`U+200C`) links drafts to engagement without using the Official X API or visible tracking IDs.
 
-- **Decoupled Scraping**: Tracking is performed via **Nitter** (external proxies) and the public **Syndication API**. Your account is never used for data scraping, ensuring that if a tracking endpoint is rate-limited, your X handle remains unaffected.
+- **Decoupled Scraping**: Tracking via Nitter + public Syndication API. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
-- **Content Diversity Gate**: Dual-layer check — trigram Jaccard (text similarity) **and** structural fingerprint (opening pattern + narrative arc) — plus an LRU format rotation across 8 archetypes. Protects the account from shadowbans and "same-shape" pattern decay even when the topic changes.
+- **Content Diversity Gate**: Dual-layer check (trigram Jaccard + structural fingerprint) plus LRU rotation across 8 format archetypes. Protects against shadowbans and same-shape pattern decay.
 
 ## ⚖️ Hard Constraints
 
@@ -609,7 +642,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
-- **Google AI Studio free tier:** 5 RPM, 20 RPD — all calls rate-guarded via `src/rateGuard.ts`.
+- **Google AI Studio free tier:** 5 RPM, 20 RPD (rate-guarded at 5 / 19 in `src/rateGuard.ts` with a 1-call buffer). When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
 
 - **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 
