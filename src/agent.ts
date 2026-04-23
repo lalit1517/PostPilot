@@ -543,7 +543,9 @@ async function diversityGate(state: typeof AgentState.State) {
     return { rerollCount: state.rerollCount ?? 0 };
   }
 
-  // Already re-rolled once — accept and move on to avoid infinite loop
+  // Already re-rolled once — accept and move on to avoid infinite loop.
+  // Advance rerollCount past the router guard (>=2) so afterDiversityGate routes
+  // forward to qualityScorer instead of looping back to contentGenerator.
   if ((state.rerollCount ?? 0) >= 1) {
     pushFingerprintToBuffer(composedFingerprint);
     logger.warn({
@@ -553,7 +555,7 @@ async function diversityGate(state: typeof AgentState.State) {
       matchedFingerprint: result.report.matchedFingerprint,
       sameFingerprintCountInRecent: result.report.sameFingerprintCountInRecent,
     }, "Draft still near-duplicate after re-roll. Accepting.");
-    return { rerollCount: state.rerollCount };
+    return { rerollCount: (state.rerollCount ?? 0) + 1 };
   }
 
   logger.warn({
@@ -566,10 +568,16 @@ async function diversityGate(state: typeof AgentState.State) {
   return { rerollCount: (state.rerollCount ?? 0) + 1 };
 }
 
-// Router: send duplicates (when rerollCount just incremented to 1) back to contentGenerator.
+// Router: send duplicates back to contentGenerator EXACTLY ONCE.
+// rerollCount semantics:
+//   0 → first pass, never re-rolled
+//   1 → duplicate detected on first pass, route back once
+//   >=2 → re-rolled already OR accepted-after-reroll, always forward
+// Hard upper bound prevents any chance of looping even if downstream nodes fail.
+const MAX_REROLLS = 1;
 function afterDiversityGate(state: typeof AgentState.State): "contentGenerator" | "qualityScorer" {
-  // Re-roll path is taken exactly once — when rerollCount === 1 and we haven't scored yet (score === 0)
-  if ((state.rerollCount ?? 0) === 1 && (state.score ?? 0) === 0) {
+  const rerolls = state.rerollCount ?? 0;
+  if (rerolls === 1 && rerolls <= MAX_REROLLS) {
     return "contentGenerator";
   }
   return "qualityScorer";
