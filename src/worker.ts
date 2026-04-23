@@ -1,9 +1,43 @@
+/*
+ * CHANGES (worker stability fixes):
+ * - isConnectionError() distinguishes transient DB failures from logic errors.
+ * - processWorkerTick() returns { ok, connectionError } so scheduler can branch.
+ * - Connection errors → fixed 15s wait, reset delay (no exponential amplification
+ *   of rapid retries that trip Supabase's IP circuit breaker).
+ * - Logic errors → existing exponential backoff.
+ * - consecutiveDbFailures counter → CRITICAL log at 5 consecutive failures.
+ * - DB health check (`SELECT 1`) at tick start prevents tasks from being marked
+ *   PROCESSING (permanent state) when DB is down.
+ */
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { extractFingerprintHex } from './fingerprint.js';
 import { computeOutcomeScore } from './outcomeScorer.js';
 import { reweightFeedback } from './feedbackWeighter.js';
 import { evolvePersona } from './personaEvolver.js';
+
+const CONNECTION_ERROR_MARKERS = [
+  'P1001',
+  'P1002',
+  'P1008',
+  "Can't reach database",
+  'connection pool',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'socket hang up',
+];
+
+function isConnectionError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return CONNECTION_ERROR_MARKERS.some((m) => message.includes(m));
+}
+
+interface TickResult {
+  ok: boolean;
+  connectionError: boolean;
+}
+
+let consecutiveDbFailures = 0;
 // Use native fetch in Node 20+
 
 // In-memory queue to prevent overlapping polls
@@ -182,8 +216,18 @@ let workerDelayMs = 10_000;
 
 const BASE_WORKER_DELAY_MS = 10_000;
 const MAX_WORKER_DELAY_MS = 5 * 60_000;
+const CONNECTION_ERROR_WAIT_MS = 15_000;
 
-async function processWorkerTick(): Promise<boolean> {
+async function processWorkerTick(): Promise<TickResult> {
+  // DB health check: don't mark tasks PROCESSING if DB is unreachable.
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.warn({ err: message }, 'DB health check failed at tick start');
+    return { ok: false, connectionError: true };
+  }
+
   try {
     // 6-hour feedback reweight check
     const sixHoursMs = 6 * 60 * 60_000;
@@ -232,11 +276,12 @@ async function processWorkerTick(): Promise<boolean> {
         }
       }
     }
-    return true;
+    return { ok: true, connectionError: false };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    logger.error({ err: message, retryInMs: workerDelayMs }, "Worker loop error");
-    return false;
+    const connErr = isConnectionError(e);
+    logger.error({ err: message, connectionError: connErr, retryInMs: workerDelayMs }, "Worker loop error");
+    return { ok: false, connectionError: connErr };
   }
 }
 
@@ -248,12 +293,27 @@ async function scheduledWorkerTick() {
   }
 
   workerTickRunning = true;
-  const ok = await processWorkerTick();
+  const result = await processWorkerTick();
   workerTickRunning = false;
 
-  workerDelayMs = ok
-    ? BASE_WORKER_DELAY_MS
-    : Math.min(workerDelayMs * 2, MAX_WORKER_DELAY_MS);
+  if (result.ok) {
+    consecutiveDbFailures = 0;
+    workerDelayMs = BASE_WORKER_DELAY_MS;
+  } else if (result.connectionError) {
+    consecutiveDbFailures++;
+    if (consecutiveDbFailures >= 5) {
+      logger.error(
+        { consecutiveDbFailures },
+        'CRITICAL: DB unreachable for 5 consecutive ticks — check Supabase Network Bans at supabase.com/dashboard/project/_/database/settings and verify DATABASE_URL tcp_keepalives_idle parameter is set'
+      );
+      consecutiveDbFailures = 0;
+    }
+    workerDelayMs = BASE_WORKER_DELAY_MS;
+    setTimeout(() => void scheduledWorkerTick(), CONNECTION_ERROR_WAIT_MS);
+    return;
+  } else {
+    workerDelayMs = Math.min(workerDelayMs * 2, MAX_WORKER_DELAY_MS);
+  }
 
   setTimeout(() => void scheduledWorkerTick(), workerDelayMs);
 }

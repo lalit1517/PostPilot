@@ -1,54 +1,108 @@
+/*
+ * CHANGES (pool exhaustion fixes):
+ * - N+1 outcome query → ONE findMany across the full feedback date-range,
+ *   then in-memory filter per feedback (±3 days).
+ * - Per-row updates → single $transaction batch (1 checkout, not N).
+ * - Size guard: cap to 100 most recent feedbacks to bound query time.
+ * - Mutex: isReweighting flag prevents concurrent runs from 6h schedule
+ *   and end-of-attempt-5 engagement trigger both firing (double exhaustion).
+ */
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { classifyFeedback, sentimentWeight } from './feedbackSentiment.js';
 
-export async function reweightFeedback(): Promise<void> {
-  const feedbacks = await prisma.feedback.findMany({
-    select: { id: true, created_at: true, feedback_text: true },
-  });
+let isReweighting = false;
 
-  if (feedbacks.length === 0) {
-    logger.info('No feedback rows to reweight');
+const THREE_DAYS_MS = 3 * 24 * 60 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+const MAX_FEEDBACKS = 100;
+
+interface FeedbackUpdate {
+  id: string;
+  weightedScore: number;
+}
+
+export async function reweightFeedback(): Promise<void> {
+  if (isReweighting) {
+    logger.info('reweightFeedback skipped: already running');
     return;
   }
+  isReweighting = true;
 
-  let updated = 0;
+  try {
+    let feedbacks = await prisma.feedback.findMany({
+      select: { id: true, created_at: true, feedback_text: true },
+      orderBy: { created_at: 'asc' },
+    });
 
-  for (const fb of feedbacks) {
-    const threeDaysMs = 3 * 24 * 60 * 60_000;
-    const windowStart = new Date(fb.created_at.getTime() - threeDaysMs);
-    const windowEnd = new Date(fb.created_at.getTime() + threeDaysMs);
+    if (feedbacks.length === 0) {
+      logger.info('No feedback rows to reweight');
+      return;
+    }
 
-    const nearbyOutcomes = await prisma.tweetOutcome.findMany({
+    if (feedbacks.length > MAX_FEEDBACKS) {
+      logger.warn({ total: feedbacks.length }, 'Feedback table large; capping reweight to 100 most recent');
+      feedbacks = feedbacks.slice(-MAX_FEEDBACKS);
+    }
+
+    // ONE query for all outcomes in the expanded range.
+    const first = feedbacks[0];
+    const last = feedbacks[feedbacks.length - 1];
+    if (!first || !last) return;
+    const rangeStart = new Date(first.created_at.getTime() - THREE_DAYS_MS);
+    const rangeEnd = new Date(last.created_at.getTime() + THREE_DAYS_MS);
+
+    const allOutcomes = await prisma.tweetOutcome.findMany({
       where: {
         tweet: {
-          created_at: { gte: windowStart, lte: windowEnd },
+          created_at: { gte: rangeStart, lte: rangeEnd },
         },
       },
-      select: { outcome_score: true },
+      select: {
+        outcome_score: true,
+        tweet: { select: { created_at: true } },
+      },
     });
 
-    if (nearbyOutcomes.length === 0) continue;
+    const updates: FeedbackUpdate[] = [];
 
-    const avgOutcomeScore =
-      nearbyOutcomes.reduce((sum, o) => sum + o.outcome_score, 0) / nearbyOutcomes.length;
+    for (const fb of feedbacks) {
+      const windowStart = fb.created_at.getTime() - THREE_DAYS_MS;
+      const windowEnd = fb.created_at.getTime() + THREE_DAYS_MS;
 
-    const daysSinceFeedback =
-      (Date.now() - fb.created_at.getTime()) / (24 * 60 * 60_000);
-    const recencyWeight = 1 / (1 + daysSinceFeedback);
+      const nearbyOutcomes = allOutcomes.filter((o) => {
+        const t = o.tweet.created_at.getTime();
+        return t >= windowStart && t <= windowEnd;
+      });
 
-    const { sentiment } = classifyFeedback(fb.feedback_text);
-    const sentimentMultiplier = sentimentWeight(sentiment);
+      if (nearbyOutcomes.length === 0) continue;
 
-    const weightedScore = recencyWeight * sentimentMultiplier * avgOutcomeScore;
+      const avgOutcomeScore =
+        nearbyOutcomes.reduce((sum, o) => sum + o.outcome_score, 0) / nearbyOutcomes.length;
 
-    await prisma.feedback.update({
-      where: { id: fb.id },
-      data: { weighted_score: weightedScore },
-    });
+      const daysSinceFeedback = (Date.now() - fb.created_at.getTime()) / DAY_MS;
+      const recencyWeight = 1 / (1 + daysSinceFeedback);
 
-    updated++;
+      const { sentiment } = classifyFeedback(fb.feedback_text);
+      const sentimentMultiplier = sentimentWeight(sentiment);
+
+      const weightedScore = recencyWeight * sentimentMultiplier * avgOutcomeScore;
+      updates.push({ id: fb.id, weightedScore });
+    }
+
+    if (updates.length > 0) {
+      await prisma.$transaction(
+        updates.map((u) =>
+          prisma.feedback.update({
+            where: { id: u.id },
+            data: { weighted_score: u.weightedScore },
+          })
+        )
+      );
+    }
+
+    logger.info({ updated: updates.length, total: feedbacks.length }, 'Feedback reweighting complete');
+  } finally {
+    isReweighting = false;
   }
-
-  logger.info({ updated, total: feedbacks.length }, 'Feedback reweighting complete');
 }
