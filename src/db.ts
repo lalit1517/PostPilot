@@ -1,12 +1,16 @@
 /*
- * CHANGES (DB stability fixes v2):
- * - Keepalive runs every 90s (was 3min) and does NOT unref() — we want it to
- *   actively keep pool sockets warm on Render free tier during idle periods.
- * - Middleware now ACTUALLY retries the failed query after reconnect (v1 just
- *   reconnected then re-threw, so the user query still failed).
- * - Up to 2 reconnect+retry attempts per query with 1.5s + 3s waits. After
- *   that, re-throw so fallbacks can handle it.
- * - stopKeepalive() still exported for graceful shutdown.
+ * CHANGES (DB stability fixes v3 — pool exhaustion guard):
+ * - Activity-aware keepalive: skips ping if a real query already succeeded
+ *   within the keepalive interval. Prevents keepalive from competing for pool
+ *   slots during active periods and from firing storms when Render CPU throttle
+ *   resumes after idle.
+ * - P2024 (pool timeout) now treated as reconnectable — middleware
+ *   $disconnect + $connect to flush zombie sockets before retrying.
+ * - Middleware retries reduced to 1 (was 2). During a real pool storm, more
+ *   retries just grab more zombie slots. Fail fast, let upstream fallbacks or
+ *   caller handle it.
+ * - Keepalive runs on its own path that tolerates pool-timeout errors quietly —
+ *   they're expected during CPU throttle wake-up.
  * - See DATABASE_URL guidance comment below for required URL params.
  */
 import 'dotenv/config';
@@ -39,9 +43,15 @@ prisma.$on('error', (e: Prisma.LogEvent) => {
   }
 });
 
-const RECONNECT_ERROR_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017']);
-const MAX_RETRY_ATTEMPTS = 2;
-const RETRY_DELAYS_MS = [1500, 3000];
+const RECONNECT_ERROR_CODES = new Set([
+  'P1001', // Can't reach database
+  'P1002', // DB timed out
+  'P1008', // Operations timed out
+  'P1017', // Server closed connection
+  'P2024', // Pool timeout — zombie connections occupying slots
+]);
+const MAX_RETRY_ATTEMPTS = 1;
+const RETRY_DELAYS_MS = [1500];
 
 function isReconnectableError(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientKnownRequestError && RECONNECT_ERROR_CODES.has(err.code)) {
@@ -54,6 +64,7 @@ function isReconnectableError(err: unknown): boolean {
   if (err instanceof Error) {
     if (err.message?.includes("Can't reach database")) return true;
     if (err.message?.includes('Server has closed the connection')) return true;
+    if (err.message?.includes('Timed out fetching a new connection')) return true;
     if (err.message?.includes('ECONNREFUSED')) return true;
     if (err.message?.includes('ETIMEDOUT')) return true;
   }
@@ -64,18 +75,24 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Track last successful query timestamp. Used by keepalive to skip pings when
+// real traffic is already keeping the pool warm.
+let lastQuerySuccessAt = Date.now();
+
 prisma.$use(async (params, next) => {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
     try {
-      return await next(params);
+      const result = await next(params);
+      lastQuerySuccessAt = Date.now();
+      return result;
     } catch (err: unknown) {
       lastErr = err;
       if (!isReconnectableError(err) || attempt === MAX_RETRY_ATTEMPTS) {
         throw err;
       }
       const message = err instanceof Error ? err.message : String(err);
-      const delay = RETRY_DELAYS_MS[attempt] ?? 3000;
+      const delay = RETRY_DELAYS_MS[attempt] ?? 1500;
       logger.warn(
         { model: params.model, action: params.action, attempt: attempt + 1, delayMs: delay, err: message },
         'DB unreachable; reconnecting and retrying query'
@@ -94,20 +111,38 @@ prisma.$use(async (params, next) => {
 });
 
 const KEEPALIVE_INTERVAL_MS = 90_000;
+const KEEPALIVE_SKIP_THRESHOLD_MS = 60_000;
 let keepaliveTimer: NodeJS.Timeout | null = null;
+
+async function runKeepalivePing(): Promise<void> {
+  // Skip if real traffic already warmed the pool recently.
+  if (Date.now() - lastQuerySuccessAt < KEEPALIVE_SKIP_THRESHOLD_MS) {
+    return;
+  }
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    // $use middleware already updated lastQuerySuccessAt on success.
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Pool exhaustion and post-throttle connect errors are expected on Render
+    // free tier during wake-up — log at debug-ish warn, don't alarm.
+    if (
+      message.includes('Timed out fetching a new connection') ||
+      message.includes("Can't reach database")
+    ) {
+      logger.warn({ err: message }, 'DB keepalive ping failed (expected during cold wake-up)');
+      return;
+    }
+    logger.warn({ err: message }, 'DB keepalive ping failed');
+  }
+}
 
 if (process.env.NODE_ENV !== 'test') {
   keepaliveTimer = setInterval(() => {
-    void (async () => {
-      try {
-        await prisma.$queryRaw`SELECT 1`;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.warn({ err: message }, 'DB keepalive ping failed');
-      }
-    })();
+    void runKeepalivePing();
   }, KEEPALIVE_INTERVAL_MS);
-  // Intentionally do NOT unref() — keepalive must run during idle to keep pool warm.
+  // Intentionally NOT unref() — keepalive must actively run during idle to
+  // keep pool warm on Render free tier.
 }
 
 export function stopKeepalive(): void {
