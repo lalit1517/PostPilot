@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { StateGraph, START, END, Annotation } from "@langchain/langgraph";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
-import { prisma } from "./db.js";
+import { prisma, ensureDbReady } from "./db.js";
 import { logger } from "./logger.js";
 import { canCallLLM, recordLLMCall } from "./rateGuard.js";
 import { getTrendingTopics } from "./trends.js";
@@ -265,6 +265,15 @@ async function computeTopicBlacklist(): Promise<string[]> {
 async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
+
+  // Warm the pool BEFORE the parallel burst. 9 simultaneous queries against a
+  // stale/cold pool (post-idle) is the worst case for P1001. One probe first
+  // gives the middleware a chance to reconnect on a single query path.
+  const dbReady = await ensureDbReady();
+  if (!dbReady) {
+    logger.error("contextLoader: DB not ready after warm-up; aborting generation");
+    throw new Error("DB unreachable — aborting generation");
+  }
 
   const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics, lengthTarget, topicBlacklist, recentFingerprints] = await Promise.all([
     prisma.engagement.findMany({
