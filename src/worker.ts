@@ -47,6 +47,36 @@ function getJitterDelay(baseDelayMs: number) {
   return baseDelayMs + Math.floor(Math.random() * 2000);
 }
 
+async function revertTelegramButtonOnFailure(
+  chatId: string | null,
+  messageId: number | null,
+  tweetId: string,
+): Promise<void> {
+  if (!chatId || !messageId) return;
+  const botToken = process.env.TELEGRAM_BOT_TOKEN;
+  if (!botToken) return;
+
+  const keyboard = {
+    inline_keyboard: [
+      [{ text: "↩️ Not Posted (resolution failed)", callback_data: "noop" }],
+    ],
+  };
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageReplyMarkup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: keyboard }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      logger.warn({ tweetId, status: res.status, body }, 'Telegram button revert returned non-OK');
+    }
+  } catch (err) {
+    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to revert Telegram button');
+  }
+}
+
 export async function resolveTweetAfterPost(tweetId: string, username: string, attempt: number = 1) {
   if (activePolls.has(tweetId)) return;
   activePolls.add(tweetId);
@@ -101,11 +131,12 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
         await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1, later);
         logger.info({ tweetId, nextAttemptAt: later }, "Tweet not found yet. Scheduling ONE final delayed retry.");
       } else {
-        await prisma.tweet.update({
+        const failedTweet = await prisma.tweet.update({
           where: { id: tweetId },
           data: { status: 'RESOLVE_FAILED', posted: false, posted_at: null }
         });
         logger.error({ tweetId }, "Tweet not found after all retries. Marked RESOLVE_FAILED — fingerprint destroyed or tweet never posted.");
+        await revertTelegramButtonOnFailure(failedTweet.telegram_chat_id, failedTweet.telegram_message_id, tweetId);
       }
     }
   } catch (error: any) {

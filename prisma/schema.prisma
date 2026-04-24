@@ -21,6 +21,8 @@ model Tweet {
   live_url       String?
   fingerprint    String?        @unique
   posted_at      DateTime?
+  telegram_chat_id    String?
+  telegram_message_id Int?
   created_at     DateTime       @default(now())
   
   versions       TweetVersion[]
