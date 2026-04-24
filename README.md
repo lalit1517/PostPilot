@@ -184,7 +184,14 @@ When a draft arrives in Telegram, you get four buttons. Here's exactly what each
 
 - You posted but the auto-detection silently failed
 
-Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, and **mutates the button label to "✅ Marked as Posted"** in the same Telegram message. If `RESOLVE_TWEET` still finds nothing after all retries, the tweet is reverted to `RESOLVE_FAILED` (not treated as posted).
+Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, persists the Telegram `chat_id` + `message_id` on the Tweet row, and **mutates the button label to "✅ Marked as Posted"** in the same Telegram message.
+
+If `RESOLVE_TWEET` still finds nothing after all retries (~55 min total: 10 min initial + 45 min fallback), the worker:
+
+1. Marks the tweet `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null`.
+2. Edits the original Telegram message via `editMessageReplyMarkup`, replacing the button with **"↩️ Not Posted (resolution failed)"**.
+
+This covers two common cases: you clicked ✅ Posted but never actually posted, or the tweet got deleted/unpublished before the worker could confirm it. No manual cleanup needed — the Telegram message self-corrects.
 
 > **You almost never need the Posted button.** Open in X handles everything automatically via fingerprint. Posted is the escape hatch for when things go wrong.
 
@@ -294,7 +301,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — likes, retweets, impressions at each interval |
@@ -356,6 +363,7 @@ X_USERNAME=your_handle                 # X handle for tweet resolution scraping
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
 TELEGRAM_BOT_TOKEN=...                 # From @BotFather
+TELEGRAM_CHAT_ID=...                   # Numeric chat ID from @userinfobot — used for bot-initiated alerts (RESOLVE_FAILED, rate-limit warnings)
 TELEGRAM_WEBHOOK_SECRET=...            # Secret token for Telegram webhook verification (see below)
 N8N_WEBHOOK_URL=https://...            # n8n webhook URL for draft-ready callbacks
 INTERNAL_API_KEY=...                   # API key protecting admin + generate endpoints (see below)
@@ -383,11 +391,13 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 `INTERNAL_API_KEY` is required in the `X-API-Key` header for all `/api/admin/*`, `/api/generate`, and `/api/retries/process` requests.
 
-`TELEGRAM_WEBHOOK_SECRET` must be passed as `secret_token` when registering your webhook with Telegram:
+**Register the Telegram webhook** — without this, button clicks (✅ Posted, 📋 Copy) never reach the server and nothing happens. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
 
-```bash
-curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>"
 ```
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
+```
+
+Expect `{"ok":true,"result":true,"description":"Webhook was set"}`. Verify anytime with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`. The `secret_token` is checked on every incoming callback — mismatch returns `403` and the button click is rejected.
 
 ### 3. Set up the database
 
@@ -409,7 +419,7 @@ npx prisma generate
 
 2.  **Get Chat ID**: Message [@userinfobot](https://t.me/userinfobot) and send `/start` to get your numeric Chat ID.
 
-3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` in your `.env` or Render variables.
+3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` and the numeric Chat ID as `TELEGRAM_CHAT_ID` in your `.env` or Render variables. `TELEGRAM_CHAT_ID` is used for bot-initiated alerts (e.g. `RESOLVE_FAILED`, rate-limit warnings) that originate from the server rather than as a reply to a user message.
 
 ### 5. Configure n8n
 
@@ -494,6 +504,7 @@ When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (
     *   In both the **Generate Tweet** and **Process Retries** nodes (HTTP Request), locate the URL and Header fields.
     *   Replace `{{ $env.BASE_URL }}` with your actual domain (e.g., `https://you.onrender.com`).
     *   Replace `{{ $env.INTERNAL_API_KEY }}` with your `INTERNAL_API_KEY`.
+    *   In the **Telegram (Notification)** node of `workflows.json` **and** the **Telegram (Error Alert)** node of `workflows-error.json`, replace `{{ $env.TELEGRAM_CHAT_ID }}` in the **Chat ID** field with your numeric chat ID from [@userinfobot](https://t.me/userinfobot).
 
 
 > [!NOTE]

@@ -233,7 +233,7 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
         try {
           await sendTelegramMessage(
             chatId,
-            `⚠️ *Generation skipped* — Gemini quota exhausted.\nTweet \`${tweetId}\` marked as \`GENERATION_RATE_LIMITED\`.\nRetry after quota resets (~24h) or enable billing.`
+            `⚠️ *Generation skipped* — Gemini quota exhausted.\nTweet \`${tweetId}\` marked as \`GENERATION_RATE_LIMITED\`.\nRetry after quota resets (~24h).`
           );
         } catch (tgErr: unknown) {
           const m = tgErr instanceof Error ? tgErr.message : String(tgErr);
@@ -694,12 +694,15 @@ app.post('/api/telegram/webhook', async (req, res) => {
     if (!tweet) return res.status(404).json({ error: "Tweet not found" });
 
     if (action === 'pc' || action === 'posted_confirmed') {
+      const messageIdForPersist = callback_query.message.message_id;
       await prisma.tweet.update({
         where: { id: tweetId },
         data: {
           status: 'POSTED_CONFIRMED',
           posted: true,
-          posted_at: new Date()
+          posted_at: new Date(),
+          telegram_chat_id: String(chatId),
+          telegram_message_id: messageIdForPersist,
         }
       });
 
@@ -722,7 +725,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
           [{ text: "🚀 Open in X", url: tweet.intent_url || 'https://twitter.com' }],
           [{ text: "✏️ Edit Topic", url: `${baseUrl}/api/view-edit?id=${tweetId}&token=${postedToken}` }],
           [{ text: "💬 Feedback", url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}` }],
-          [{ text: "✅ Marked as Posted", callback_data: "noop" }, { text: "📋 Copy", callback_data: `ct:${tweetId}:${token}` }],
+          [{ text: "✅ Marked as Posted", callback_data: "noop" }],
         ],
       };
       try {
@@ -962,7 +965,7 @@ async function startWorkerWhenDbReady() {
 const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 [STARTUP] Server is live on port ${PORT}`);
-  
+
   // Start the background worker only after the database accepts a query.
   void startWorkerWhenDbReady();
 
