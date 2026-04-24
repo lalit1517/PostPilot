@@ -467,19 +467,9 @@ const RPD_LIMIT = 19;     // bump to your tier's RPD (leave 1-call buffer)
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (skips diversity/scorer/refiner/webhook), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
 
 
-2.  **Telegram Buttons**: In the **Telegram** node, add the following 4 buttons under the **Reply Markup** section:
+2.  **Telegram Buttons**: Pre-baked in `workflows.json` — imports as 4 rows (one button each): `🚀 Open in X`, `✏️ Edit Topic`, `💬 Feedback`, `✅ Posted`. No manual setup needed. If the Reply Markup shows empty after import, the Telegram node `typeVersion` mismatched — re-import or set **Reply Markup** to `Inline Keyboard` and re-save.
 
-
-    *   `🚀 Open in X` — URL: `{{ $json.body.intentUrl }}` (Expression)
-
-
-    *   `✏️ Edit Topic` — URL: `{{ $json.body.editUrl }}` (Expression)
-
-    *   `💬 Feedback` — URL: `{{ $json.body.feedbackUrl }}` (Expression)
-
-    *   `✅ Posted` — Callback Data: `{{ "pc:" + $json.body.tweet_id + ":" + $json.body.token.substring(0,8) }}` (Expression)
-
-3.  **Telegram Settings**: In the same node, set **Reply Markup** to `Inline Keyboard` and **Parse Mode** to `HTML`.
+3.  **Telegram Settings**: Parse Mode pre-set to `HTML` in `workflows.json`.
 
 4.  **Telegram Text**: Set the **Text** field to the following (Expression):
     ```html

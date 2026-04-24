@@ -79,15 +79,67 @@
       "parameters": {
         "chatId": "{{CHAT_ID}}",
         "text": "=🚀 <b>New X Post Draft - {{ $json.body.topic }}</b>\n---\n<b>Draft:</b>\n<pre><code>{{ $json.body.htmlDraft || $json.body.draft }}</code></pre>\n\n<b>Time:</b> {{ $json.body.time_of_day || 'Not set' }}\n<b>Score:</b> {{ $json.body.score || 0 }}/10\n---",
+        "replyMarkup": "inlineKeyboard",
+        "inlineKeyboard": {
+          "rows": [
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "🚀 Open in X",
+                    "additionalFields": {
+                      "url": "={{ $json.body.intentUrl }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✏️ Edit Topic",
+                    "additionalFields": {
+                      "url": "={{ $json.body.editUrl }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "💬 Feedback",
+                    "additionalFields": {
+                      "url": "={{ $json.body.feedbackUrl }}"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "row": {
+                "buttons": [
+                  {
+                    "text": "✅ Posted",
+                    "additionalFields": {
+                      "callback_data": "={{ 'pc:' + $json.body.tweet_id + ':' + $json.body.token.substring(0,8) }}"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
         "additionalFields": {
-          "parse_mode": "HTML",
-          "reply_markup": "={{ JSON.stringify({\n  \"inline_keyboard\": [\n    [{ \"text\": \"🚀 Open in X\", \"url\": ($json.body.intentUrl || 'https://twitter.com') }],\n    [{ \"text\": \"✏️ Edit Topic\", \"url\": ($json.body.editUrl || 'https://twitter.com') }],\n    [{ \"text\": \"💬 Feedback\", \"url\": ($json.body.feedbackUrl || 'https://twitter.com') }],\n    [\n      { \"text\": \"✅ Posted\", \"callback_data\": \"pc:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 8)) },\n      { \"text\": \"📋 Copy\", \"callback_data\": \"ct:\" + ($json.body.tweet_id || '') + \":\" + (($json.body.token || '').substring(0, 8)) }\n    ]\n  ]\n}) }}"
+          "parse_mode": "HTML"
         }
       },
       "id": "18991a0c-66f8-450f-a950-c8b1da0c5cf5",
       "name": "Telegram (Notification)",
       "type": "n8n-nodes-base.telegram",
-      "typeVersion": 1,
+      "typeVersion": 1.2,
       "position": [
         420,
         500
