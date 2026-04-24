@@ -269,44 +269,54 @@ async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
 
-  // Warm the pool BEFORE the parallel burst. 9 simultaneous queries against a
-  // stale/cold pool (post-idle) is the worst case for P1001. One probe first
-  // gives the middleware a chance to reconnect on a single query path.
+  // Warm the single DB socket before running the query sequence below.
+  // ensureDbReady() is cheap (~1 SELECT) and catches a dead socket so the
+  // first real query doesn't eat the reconnect penalty.
   const dbReady = await ensureDbReady();
   if (!dbReady) {
     logger.error("contextLoader: DB not ready after warm-up; aborting generation");
     throw new Error("DB unreachable — aborting generation");
   }
 
-  const [topTweetsQuery, weightedFeedbackQuery, unweightedFeedbackQuery, recentTopicsQuery, activeProfile, trendingTopics, lengthTarget, topicBlacklist, recentFingerprints] = await Promise.all([
-    prisma.engagement.findMany({
-      orderBy: { likes: 'desc' },
-      take: 5,
-      include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
-    }),
-    prisma.feedback.findMany({
-      orderBy: { weighted_score: 'desc' },
-      take: 5,
-      where: { weighted_score: { not: null } }
-    }),
-    prisma.feedback.findMany({
-      orderBy: { created_at: 'desc' },
-      take: 5
-    }),
-    prisma.tweet.findMany({
-      orderBy: { created_at: 'desc' },
-      take: 10,
-      select: { original_topic: true, edited_topic: true }
-    }),
-    prisma.personaProfile.findFirst({
-      where: { is_active: true },
-      orderBy: { version: 'desc' }
-    }),
-    getTrendingTopics(),
-    computeLengthTarget(),
-    computeTopicBlacklist(),
-    getRecentStructuralFingerprints(15),
-  ]);
+  // Load sequentially. The pool has one connection (see src/db.ts), so
+  // Promise.all here is a lie — queries serialize anyway, and when one
+  // stalls the other 8 block behind it, timing out /api/generate's
+  // tweet.create() with P2024. Explicit sequential awaits bound any
+  // single-query stall to that one query.
+  //
+  // Non-DB call (getTrendingTopics, an HTTP scrape with 30-min cache) runs
+  // in parallel with the DB sequence via Promise.all at the end — it
+  // doesn't touch the DB socket, so it's free to overlap.
+  const trendingTopicsPromise = getTrendingTopics();
+
+  const topTweetsQuery = await prisma.engagement.findMany({
+    orderBy: { likes: 'desc' },
+    take: 5,
+    include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
+  });
+  const weightedFeedbackQuery = await prisma.feedback.findMany({
+    orderBy: { weighted_score: 'desc' },
+    take: 5,
+    where: { weighted_score: { not: null } }
+  });
+  const unweightedFeedbackQuery = await prisma.feedback.findMany({
+    orderBy: { created_at: 'desc' },
+    take: 5
+  });
+  const recentTopicsQuery = await prisma.tweet.findMany({
+    orderBy: { created_at: 'desc' },
+    take: 10,
+    select: { original_topic: true, edited_topic: true }
+  });
+  const activeProfile = await prisma.personaProfile.findFirst({
+    where: { is_active: true },
+    orderBy: { version: 'desc' }
+  });
+  const lengthTarget = await computeLengthTarget();
+  const topicBlacklist = await computeTopicBlacklist();
+  const recentFingerprints = await getRecentStructuralFingerprints(15);
+
+  const trendingTopics = await trendingTopicsPromise;
 
   const formatArchetype = getNextFormat(recentFingerprints);
 

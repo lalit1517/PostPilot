@@ -338,15 +338,15 @@ npm install
 Create `.env` in the project root:
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=7&pool_timeout=20&connect_timeout=15&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&pool_timeout=60&connect_timeout=15&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
                                        # Supabase transaction pooler (port 6543) for Prisma runtime.
                                        # Stability params (ALL required, see src/db.ts comment block):
-                                       #   connection_limit=7            — Supabase free/pro caps upstream conns; 7 is safe
-                                       #   pool_timeout=20               — wait up to 20s for a free pool slot
-                                       #   connect_timeout=15            — boot-time guard against Supavisor cold-start P1001
-                                       #   tcp_keepalives_idle=60        — OS-level TCP keepalive every 60s
-                                       #   tcp_keepalives_interval=10    — probe retry every 10s if idle
-                                       #   tcp_keepalives_count=5        — 5 failed probes = dead socket
+                                       #   connection_limit=1            — single serialized socket; eliminates pool-state bugs for this workload (3 tweets/day, no concurrency)
+                                       #   pool_timeout=60                — wait up to 60s for the single slot (covers contextLoader's Promise.all(9) queueing end-to-end)
+                                       #   connect_timeout=15             — boot-time guard against Supavisor cold-start P1001
+                                       #   tcp_keepalives_idle=60         — OS-level TCP keepalive every 60s
+                                       #   tcp_keepalives_interval=10     — probe retry every 10s if idle
+                                       #   tcp_keepalives_count=5         — 5 failed probes = dead socket
 DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
                                        # Supabase session pooler (port 5432) for Prisma migrations; no pgbouncer query param.
                                        # Username MUST be `postgres.PROJECT_REF` (Supavisor format), not bare `postgres`.
@@ -511,13 +511,39 @@ When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (
 
 ## 🛡️ Database Stability
 
-If you see `P1001`, `P2024`, or "Can't reach database" errors, the three defenses live in [`src/db.ts`](src/db.ts):
+PostPilot runs in **single-connection mode** (`connection_limit=1`) with **explicit sequential query loading** in `contextLoader`. The workload is ~3 generations/day with zero concurrent requests — a real pool would add state-drift bugs without any throughput benefit.
 
-1. **Connection-string params** — `connection_limit=7`, `connect_timeout=15`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
-2. **Activity-aware keepalive** — 90s interval, skips pings when real traffic already warms the pool.
-3. **Reconnect middleware + `ensureDbReady()`** — catches `P1001/P1002/P1008/P1017/P2024` + pool-timeout messages; `$disconnect`s to flush zombies and retries once. `ensureDbReady()` probes before `contextLoader`'s parallel burst.
+**How it works** (see [`src/db.ts`](src/db.ts), [`src/agent.ts`](src/agent.ts) `contextLoader`):
+
+1. **Connection-string params** — `connection_limit=1`, `pool_timeout=60`, `connect_timeout=15`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
+2. **Retry-once middleware** — on `P1001 / P1002 / P1008 / P1017` or `"Can't reach database" / "Server has closed" / ECONNREFUSED / ETIMEDOUT`, waits 1.5s and retries the query once. The Prisma engine reconnects transparently on the retry call — no manual `$disconnect()` (which would nuke the only connection and block every other caller).
+3. **`ensureDbReady()`** — probes with one retry before `contextLoader`'s query sequence, so a cold socket reconnects on one probe rather than on the first real query.
+4. **Sequential loading in `contextLoader`** — the 8 DB-touching reads run as explicit `await`s instead of `Promise.all`. On a 1-slot pool `Promise.all` is a lie (queries serialize anyway), and when one query stalls, a fake-parallel fan-out blocks every subsequent request (e.g. `/api/generate`'s `tweet.create()`) with `P2024`. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
 
 `canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
+
+**Wall-clock impact:** `contextLoader` runs ~400–500ms total (was ~350ms in serialized-Promise.all mode, ~80ms on a real pool). Invisible against the n8n 120s timeout.
+
+### Troubleshooting: `P1001` on port **5432** during deploy
+
+If your first Render deploy fails with:
+
+```
+Error: P1001: Can't reach database server at `aws-1-ap-south-1.pooler.supabase.com:5432`
+```
+
+That's `DIRECT_URL` (port 5432, session pooler) during `prisma migrate deploy` at boot — **not** `DATABASE_URL`. Usually a Supabase cold-start blip, not a config problem.
+
+**Fix in order:**
+
+1. **Retry the deploy.** Render dashboard → *Manual Deploy → Deploy latest commit*. ~95% of the time it goes through on the second try.
+2. **If it fails again, bump `connect_timeout` on `DIRECT_URL` to 30s:**
+   ```env
+   DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:5432/postgres?connect_timeout=30
+   ```
+3. **If it still fails,** check Supabase dashboard → Project → Settings → Database. Free-tier projects pause after ~7 days idle; hit *Restore* and redeploy.
+
+Runtime is unaffected — `DIRECT_URL` is only used during `prisma migrate deploy` at startup.
 
 ## 📊 Analytics (Grafana)
 
@@ -577,7 +603,7 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 3. **Start Command**: `npm start` (runs migrations, then starts the server + in-process worker).
 4. **Dashboard Release Command**: run `npm run release:grafana` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=7` (NOT 20) and all five `tcp_keepalives_*` / `connect_timeout` params are required.
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=1` + `pool_timeout=60` and all five `tcp_keepalives_*` / `connect_timeout` params are required. See [Database Stability](#database-stability) for why single-connection mode.
 
    - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param. Username must be `postgres.PROJECT_REF`.
 
