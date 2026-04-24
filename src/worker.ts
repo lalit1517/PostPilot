@@ -212,9 +212,13 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
 let lastReweightAt = 0;
 let workerStarted = false;
 let workerTickRunning = false;
-let workerDelayMs = 10_000;
+let workerDelayMs = 60_000;
 
-const BASE_WORKER_DELAY_MS = 10_000;
+// Tick every 60s. Most ticks do nothing (no pending tasks). Fewer ticks =
+// fewer chances for Supavisor to idle-kill the socket between ticks =
+// quieter logs. RESOLVE_TWEET already has a 10-min initial delay baked in,
+// so 60s tick latency is invisible for real workloads.
+const BASE_WORKER_DELAY_MS = 60_000;
 const MAX_WORKER_DELAY_MS = 5 * 60_000;
 const CONNECTION_ERROR_WAIT_MS = 15_000;
 
@@ -271,7 +275,12 @@ async function processWorkerTick(): Promise<TickResult> {
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const connErr = isConnectionError(e);
-    logger.error({ err: message, connectionError: connErr, retryInMs: workerDelayMs }, "Worker loop error");
+    // Single-tick connection blips are normal on free-tier Supavisor —
+    // log at WARN so the ERROR channel stays meaningful. The CRITICAL log
+    // inside scheduledWorkerTick() still fires after 5 consecutive tick
+    // failures, which is the signal that actually means something's wrong.
+    const logFn = connErr ? logger.warn.bind(logger) : logger.error.bind(logger);
+    logFn({ err: message, connectionError: connErr, retryInMs: workerDelayMs }, "Worker loop error");
     return { ok: false, connectionError: connErr };
   }
 }
