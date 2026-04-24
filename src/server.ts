@@ -145,29 +145,6 @@ app.get('/', (req, res) => {
   });
 });
 
-// Socket keepalive endpoint. Hit every ~5min by UptimeRobot so Supavisor
-// doesn't idle-kill the single Prisma connection. Health failures here are
-// expected during Supavisor cold-restart windows and are recovered on the
-// next real query by db.ts's retry middleware — so we log at WARN, not ERROR.
-app.get('/health/db', async (_req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    res.json({
-      status: 'ok',
-      db: 'ok',
-      timestamp: new Date().toISOString()
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err: message }, '/health/db probe failed (db.ts middleware will recover on next real query)');
-    res.status(503).json({
-      status: 'degraded',
-      db: 'unreachable',
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 const HMAC_SECRET = process.env.HMAC_SECRET as string;
 if (!HMAC_SECRET) {
   throw new Error("Missing HMAC_SECRET in environment variables");

@@ -527,11 +527,11 @@ PostPilot runs in **single-connection mode** (`connection_limit=1`) with **expli
 
 **Log-level discipline:** middleware retries log at `WARN` (normal recovery, not an alarm). The worker's per-tick connection failures also log at `WARN`. The only `ERROR`/`CRITICAL` line is the one inside `scheduledWorkerTick` that fires after **5 consecutive** connection failures — i.e. "DB has been unreachable for ~5 minutes, something is actually wrong." That's the one line worth paging on. See [Worker & Logging](#-background-workers).
 
-### Keeping logs quiet (socket keepalive)
+### Keeping logs quiet
 
-Supavisor on free tier drops idle sockets after ~5 min. Without traffic, every worker tick that lands on a dead socket logs a `WARN` while the middleware reconnects. The fix is to never let the socket go idle: point UptimeRobot at [`GET /health/db`](src/server.ts) every 5 minutes. See [24/7 Keep-Alive (UptimeRobot)](#247-keep-alive-uptimerobot) below.
+Supavisor on free tier drops idle sockets after ~5 min. The middleware in `src/db.ts` reconnects transparently on the next real query, logging a single `WARN`. A prior `/health/db` keepalive endpoint was removed: during cross-region network flaps it competed with real work for the single pool slot (45s hangs), made UptimeRobot report the service DOWN during recoverable blips, and added more noise than it saved.
 
-Belt and suspenders: the worker loop now ticks every **60s** instead of 10s. Most ticks do nothing (no pending tasks), so 6× fewer ticks = 6× fewer chances to hit a dead socket. `RESOLVE_TWEET` already has a 10-min initial delay baked in, so 60s tick latency is invisible.
+Worker loop ticks every **60s** (not 10s). Most ticks do nothing (no pending tasks), so 6× fewer ticks = 6× fewer chances to hit a dead socket. `RESOLVE_TWEET` already has a 10-min initial delay baked in, so 60s tick latency is invisible.
 
 ### Troubleshooting: `P1001` on port **5432** during deploy
 
@@ -625,9 +625,7 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
 ### 24/7 Keep-Alive (UptimeRobot)
 
-Render's free tier sleeps after 15 minutes of inactivity, and Supabase's Supavisor pooler idle-kills database sockets after ~5 minutes. Two monitors keep both alive:
-
-#### Monitor 1 — keep Render awake (web server)
+Render's free tier sleeps after 15 minutes of inactivity. A single monitor keeps it awake:
 
 1. Create a free account at [UptimeRobot.com](https://uptimerobot.com/).
 2. Click **+ Add New Monitor**.
@@ -637,18 +635,7 @@ Render's free tier sleeps after 15 minutes of inactivity, and Supabase's Supavis
 6. **Monitoring Interval**: Every `5 minutes`.
 7. Click **Create Monitor**.
 
-#### Monitor 2 — keep the DB socket warm (recommended)
-
-Without this, Supavisor drops the single Prisma connection every ~5 minutes and the background worker logs a WARN every time it reconnects. With it, the `/health/db` endpoint runs a `SELECT 1` every 5 minutes — the socket is never idle long enough to be killed.
-
-1. **+ Add New Monitor**
-2. **Monitor Type**: `HTTP(s)`
-3. **Friendly Name**: `PostPilot-DB`
-4. **URL**: `https://<your-app-name>.onrender.com/health/db`
-5. **Monitoring Interval**: Every `5 minutes`.
-6. Click **Create Monitor**.
-
-Both are free and use 2 of your 50 free monitor slots.
+> Do **not** add a second monitor against `/health/db` — that endpoint was removed. During cross-region Supavisor flaps it held the single Prisma slot for 45s and made UptimeRobot report the service as DOWN during recoverable blips.
 
 ### Railway (Alternative)
 
