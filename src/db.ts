@@ -1,33 +1,44 @@
 /*
- * CHANGES (DB stability fixes v3 — pool exhaustion guard):
- * - Activity-aware keepalive: skips ping if a real query already succeeded
- *   within the keepalive interval. Prevents keepalive from competing for pool
- *   slots during active periods and from firing storms when Render CPU throttle
- *   resumes after idle.
- * - P2024 (pool timeout) now treated as reconnectable — middleware
- *   $disconnect + $connect to flush zombie sockets before retrying.
- * - Middleware retries reduced to 1 (was 2). During a real pool storm, more
- *   retries just grab more zombie slots. Fail fast, let upstream fallbacks or
- *   caller handle it.
- * - Keepalive runs on its own path that tolerates pool-timeout errors quietly —
- *   they're expected during CPU throttle wake-up.
- * - See DATABASE_URL guidance comment below for required URL params.
+ * Single-connection Prisma client.
+ *
+ * WHY THIS SHAPE:
+ *   This project serves ~3 generations/day with no real concurrency. A real
+ *   connection pool (size >1) was the source of weeks of P1001 / P2024 storms
+ *   on Supabase Supavisor (port 6543): zombie sockets, middleware $disconnect
+ *   nuking in-flight queries, keepalive competing with real traffic.
+ *
+ *   With DATABASE_URL connection_limit=1 + pool_timeout=60, Prisma serializes
+ *   all queries onto one socket. Supavisor may drop the socket after ~5 min
+ *   idle; the next real query auto-reconnects in ~1s (Prisma engine handles
+ *   it). No keepalive, no health-check pings — nothing to compete with real
+ *   work for the single slot.
+ *
+ *   Middleware retries ONCE on transient connect errors. It does NOT call
+ *   $disconnect()/$connect() — on a 1-slot pool that tears down the only
+ *   connection and any concurrent caller times out with P2024. The Prisma
+ *   engine reconnects on the next next(params) call on its own.
+ *
+ *   P2024 is intentionally NOT in the retry set: on a 1-slot pool it means
+ *   "caller queued and legitimately waited too long," which retry won't fix.
  */
 import 'dotenv/config';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { logger } from './logger.js';
 
 /*
- * REQUIRED DATABASE_URL PARAMS (set manually in .env, do NOT hardcode):
+ * REQUIRED DATABASE_URL PARAMS (set in .env):
  *
- *   connect_timeout=15           Boot-time P1001 guard on Supavisor cold start.
+ *   connection_limit=1           One socket. Serializes queries; eliminates
+ *                                pool-state bugs for this workload.
+ *   pool_timeout=60              Max queue wait per query. 60s is safely
+ *                                above Promise.all(9) fan-out worst case.
+ *   connect_timeout=15           Boot-time Supavisor cold-start guard.
  *   tcp_keepalives_idle=60       OS-level TCP keepalive every 60s.
  *   tcp_keepalives_interval=10   Probe retry every 10s.
- *   tcp_keepalives_count=5       5 failed probes = dead.
- *   connection_limit=7           Supabase free/pro caps upstream conns; 7 is safe.
+ *   tcp_keepalives_count=5       5 failed probes = dead socket.
  *
- *   DIRECT_URL on port 5432 username MUST be `postgres.PROJECT_REF` (Supavisor
- *   format), not bare `postgres`.
+ *   DIRECT_URL on port 5432 username MUST be `postgres.PROJECT_REF`
+ *   (Supavisor format), not bare `postgres`.
  */
 
 export const prisma = new PrismaClient({
@@ -38,20 +49,19 @@ export const prisma = new PrismaClient({
 });
 
 prisma.$on('error', (e: Prisma.LogEvent) => {
+  // Keep this as a diagnostic signal if it ever shows up — but with
+  // connection_limit=1 + pool_timeout=60 it should be extremely rare.
   if (e.message?.includes('connection pool')) {
-    logger.error('CRITICAL: Prisma connection pool exhausted. Set connection_limit=7 in DATABASE_URL.');
+    logger.warn({ msg: e.message }, 'Prisma connection-pool event');
   }
 });
 
 const RECONNECT_ERROR_CODES = new Set([
-  'P1001', // Can't reach database
+  'P1001', // Can't reach database (stale socket, Supavisor dropped us)
   'P1002', // DB timed out
   'P1008', // Operations timed out
   'P1017', // Server closed connection
-  'P2024', // Pool timeout — zombie connections occupying slots
 ]);
-const MAX_RETRY_ATTEMPTS = 1;
-const RETRY_DELAYS_MS = [1500];
 
 function isReconnectableError(err: unknown): boolean {
   if (err instanceof Prisma.PrismaClientKnownRequestError && RECONNECT_ERROR_CODES.has(err.code)) {
@@ -64,7 +74,6 @@ function isReconnectableError(err: unknown): boolean {
   if (err instanceof Error) {
     if (err.message?.includes("Can't reach database")) return true;
     if (err.message?.includes('Server has closed the connection')) return true;
-    if (err.message?.includes('Timed out fetching a new connection')) return true;
     if (err.message?.includes('ECONNREFUSED')) return true;
     if (err.message?.includes('ETIMEDOUT')) return true;
   }
@@ -75,87 +84,30 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// Track last successful query timestamp. Used by keepalive to skip pings when
-// real traffic is already keeping the pool warm.
-let lastQuerySuccessAt = Date.now();
+const RETRY_DELAY_MS = 1500;
 
 prisma.$use(async (params, next) => {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
-    try {
-      const result = await next(params);
-      lastQuerySuccessAt = Date.now();
-      return result;
-    } catch (err: unknown) {
-      lastErr = err;
-      if (!isReconnectableError(err) || attempt === MAX_RETRY_ATTEMPTS) {
-        throw err;
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      const delay = RETRY_DELAYS_MS[attempt] ?? 1500;
-      logger.warn(
-        { model: params.model, action: params.action, attempt: attempt + 1, delayMs: delay, err: message },
-        'DB unreachable; reconnecting and retrying query'
-      );
-      await sleep(delay);
-      try {
-        await prisma.$disconnect();
-        await prisma.$connect();
-      } catch (connectErr: unknown) {
-        const cm = connectErr instanceof Error ? connectErr.message : String(connectErr);
-        logger.warn({ err: cm }, 'Reconnect attempt failed; will retry query anyway');
-      }
-    }
+  try {
+    return await next(params);
+  } catch (err: unknown) {
+    if (!isReconnectableError(err)) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      { model: params.model, action: params.action, delayMs: RETRY_DELAY_MS, err: message },
+      'DB transient error; retrying query once'
+    );
+    await sleep(RETRY_DELAY_MS);
+    // No $disconnect/$connect — on a 1-slot pool that nukes the only
+    // connection. The engine reconnects transparently on this next() call.
+    return await next(params);
   }
-  throw lastErr;
 });
 
-const KEEPALIVE_INTERVAL_MS = 90_000;
-const KEEPALIVE_SKIP_THRESHOLD_MS = 60_000;
-let keepaliveTimer: NodeJS.Timeout | null = null;
-
-async function runKeepalivePing(): Promise<void> {
-  // Skip if real traffic already warmed the pool recently.
-  if (Date.now() - lastQuerySuccessAt < KEEPALIVE_SKIP_THRESHOLD_MS) {
-    return;
-  }
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    // $use middleware already updated lastQuerySuccessAt on success.
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    // Pool exhaustion and post-throttle connect errors are expected on Render
-    // free tier during wake-up — log at debug-ish warn, don't alarm.
-    if (
-      message.includes('Timed out fetching a new connection') ||
-      message.includes("Can't reach database")
-    ) {
-      logger.warn({ err: message }, 'DB keepalive ping failed (expected during cold wake-up)');
-      return;
-    }
-    logger.warn({ err: message }, 'DB keepalive ping failed');
-  }
-}
-
-if (process.env.NODE_ENV !== 'test') {
-  keepaliveTimer = setInterval(() => {
-    void runKeepalivePing();
-  }, KEEPALIVE_INTERVAL_MS);
-  // Intentionally NOT unref() — keepalive must actively run during idle to
-  // keep pool warm on Render free tier.
-}
-
-export function stopKeepalive(): void {
-  if (keepaliveTimer) {
-    clearInterval(keepaliveTimer);
-    keepaliveTimer = null;
-  }
-}
-
 /**
- * Warm-up check callers can run before a burst of parallel queries (like
- * contextLoader's Promise.all). Runs a single SELECT 1 with retry to ensure
- * the pool has at least one live connection before fan-out.
+ * Warm-up probe callers can run before a burst of parallel queries (like
+ * contextLoader's Promise.all). Runs a single SELECT 1; if it fails, one
+ * retry — same pattern as the middleware. Ensures the cold socket is live
+ * before fan-out so the first real query doesn't eat the reconnect penalty.
  */
 export async function ensureDbReady(): Promise<boolean> {
   try {
@@ -163,15 +115,14 @@ export async function ensureDbReady(): Promise<boolean> {
     return true;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.warn({ err: message }, 'ensureDbReady: initial probe failed, trying reconnect');
+    logger.warn({ err: message }, 'ensureDbReady: initial probe failed, retrying once');
+    await sleep(RETRY_DELAY_MS);
     try {
-      await prisma.$disconnect();
-      await prisma.$connect();
       await prisma.$queryRaw`SELECT 1`;
       return true;
     } catch (retryErr: unknown) {
       const rm = retryErr instanceof Error ? retryErr.message : String(retryErr);
-      logger.error({ err: rm }, 'ensureDbReady: DB unreachable after reconnect');
+      logger.error({ err: rm }, 'ensureDbReady: DB unreachable after retry');
       return false;
     }
   }

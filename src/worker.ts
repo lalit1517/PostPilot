@@ -1,13 +1,13 @@
 /*
- * CHANGES (worker stability fixes):
+ * Worker scheduler.
  * - isConnectionError() distinguishes transient DB failures from logic errors.
  * - processWorkerTick() returns { ok, connectionError } so scheduler can branch.
  * - Connection errors → fixed 15s wait, reset delay (no exponential amplification
  *   of rapid retries that trip Supabase's IP circuit breaker).
- * - Logic errors → existing exponential backoff.
- * - consecutiveDbFailures counter → CRITICAL log at 5 consecutive failures.
- * - DB health check (`SELECT 1`) at tick start prevents tasks from being marked
- *   PROCESSING (permanent state) when DB is down.
+ * - Logic errors → exponential backoff.
+ * - No pre-tick SELECT 1 health check — db.ts middleware retries transient
+ *   P1001 transparently. A pre-flight ping on a 1-slot pool was pure
+ *   contention with real work.
  */
 import { prisma } from './db.js';
 import { logger } from './logger.js';
@@ -219,15 +219,6 @@ const MAX_WORKER_DELAY_MS = 5 * 60_000;
 const CONNECTION_ERROR_WAIT_MS = 15_000;
 
 async function processWorkerTick(): Promise<TickResult> {
-  // DB health check: don't mark tasks PROCESSING if DB is unreachable.
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e);
-    logger.warn({ err: message }, 'DB health check failed at tick start');
-    return { ok: false, connectionError: true };
-  }
-
   try {
     // 6-hour feedback reweight check
     const sixHoursMs = 6 * 60 * 60_000;
