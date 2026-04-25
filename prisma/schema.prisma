@@ -71,6 +71,7 @@ model Engagement {
   tweet_id    String
   likes       Int      @default(0)
   retweets    Int      @default(0)
+  replies     Int      @default(0)
   impressions Int      @default(0)
   fetched_at  DateTime @default(now())
 
@@ -85,6 +86,7 @@ model TweetOutcome {
   tier           String
   peak_likes     Int
   peak_retweets  Int
+  peak_replies   Int      @default(0)
   quality_score  Float?
   topic          String?
   time_of_day    String?
