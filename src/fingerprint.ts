@@ -30,17 +30,6 @@ function hexToInvisible(hex: string): string {
 }
 
 /**
- * Generates an invisible fingerprint from a random 4-byte hex string (32 bits).
- * Returns an object with:
- *   - hex: the original hex string
- *   - invisible: the invisible string to append to the tweet
- */
-export function generateFingerprint(): { hex: string, invisible: string } {
-  const hex = crypto.randomBytes(4).toString('hex');
-  return { hex, invisible: hexToInvisible(hex) };
-}
-
-/**
  * Generates a fingerprint guaranteed to be unique in the Tweet table.
  * Retries up to `maxAttempts` times on collision before throwing.
  */

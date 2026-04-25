@@ -206,6 +206,8 @@ If `RESOLVE_TWEET` still finds nothing after all retries (~55 min total: 10 min 
 1. Marks the tweet `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null`.
 2. Edits the original Telegram message via `editMessageReplyMarkup`, replacing the button with **"↩️ Not Posted (resolution failed)"**.
 
+> The worker resolution guard skips on `live_url` set or `status === 'RESOLVE_FAILED'` — NOT on `posted=true`. The manual click sets `posted=true` optimistically; gating on it would silently drop every manual-confirm task before it polls. Earlier versions had this bug — the button never changed back even after hours.
+
 This covers two common cases: you clicked ✅ Posted but never actually posted, or the tweet got deleted/unpublished before the worker could confirm it. No manual cleanup needed — the Telegram message self-corrects.
 
 > **You almost never need the Posted button.** Open in X handles everything automatically via fingerprint. Posted is the escape hatch for when things go wrong.
@@ -320,7 +322,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
-| `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. (`impressions` column exists but is always 0 — Twitter's public syndication endpoint doesn't expose it; left in schema as a future hook.) |
+| `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
 | `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics (`peak_likes`, `peak_retweets`, `peak_replies`), `quality_score` copy, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
 | `PersonaProfile` | Versioned persona documents with auto-increment version and `is_active` flag |
 | `LlmCallLog` | Rate limiting ledger with `called_at` index, pruned to 48h window |
@@ -343,7 +345,6 @@ All persona configuration lives in **one file**: [`src/config/ownerProfile.ts`](
 | `experienceVoice` | persona prompt | One-line experience anchor. |
 | `cities` / `hobbies` / `slangs` | persona prompt | Personality flavor. Slangs are sparingly applied (1 per tweet max). |
 | `avoid` | persona prompt | Hard topic bans. The agent never tweets about these. |
-| `trendKeywords` | legacy, kept for back-compat | Older broader list. Real relevance filter uses `domainKeywords`. |
 | `voiceSeed` | `personaEvolver.ts` | Voice anchor used when the LLM evolves the persona — replaces the old hardcoded "GenZ Indian dev" string. |
 | `preferredLength` | length target seed | `'short' \| 'medium' \| 'long'`. Soft hint until enough outcome data exists for `computeLengthTarget()` to derive a real range. |
 | `tweetLanguages` | `trendRelevance.ts` | ISO 639-1 codes. When `'en'` is in the list, non-ASCII trends are dropped (the fix for the Turkish-holiday-passes-as-relevant bug). |

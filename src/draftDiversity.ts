@@ -1,6 +1,6 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
-import { guessFormatFromContent } from './draftFormats.js';
+import { guessFormatFromContent, isKnownFormat } from './draftFormats.js';
 
 export const SIMILARITY_THRESHOLD = 0.65;
 export const RECENT_DRAFT_COUNT = 20;
@@ -131,10 +131,7 @@ export function pushFingerprintToBuffer(fingerprint: string): void {
   }
 }
 
-export function getRecentFingerprints(): string[] {
-  return [...fingerprintBuffer];
-}
-
+/** @internal Test helper. Resets the in-process fingerprint ring buffer. */
 export function clearFingerprintBuffer(): void {
   fingerprintBuffer.length = 0;
 }
@@ -155,6 +152,10 @@ let backfillDone = false;
 
 export function registerDraftFormat(key: string, formatName: string): void {
   if (!key || !formatName) return;
+  if (!isKnownFormat(formatName)) {
+    logger.warn({ key, formatName }, 'registerDraftFormat: unknown format name; skipping');
+    return;
+  }
   if (formatMap.has(key)) formatMap.delete(key);
   formatMap.set(key, { formatName, registeredAt: Date.now() });
   while (formatMap.size > FORMAT_MAP_SIZE) {
@@ -168,6 +169,7 @@ export function getRegisteredFormat(key: string): string | null {
   return formatMap.get(key)?.formatName ?? null;
 }
 
+/** @internal Test helper. Resets the format map + backfill flag. */
 export function clearFormatMap(): void {
   formatMap.clear();
   backfillDone = false;

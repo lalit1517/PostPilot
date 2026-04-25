@@ -187,10 +187,6 @@ export function getNextFormatWithMeta(
   return { selected: fallback, unusedCount: 0, consideredRecentFormats };
 }
 
-export function getNextFormat(recentFingerprints: readonly string[]): FormatArchetype {
-  return getNextFormatWithMeta(recentFingerprints).selected;
-}
-
 export function isKnownFormat(name: string): boolean {
   return FORMAT_NAME_SET.has(name);
 }
