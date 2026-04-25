@@ -112,7 +112,7 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 
       // First engagement fetch: 10 minutes after POSTED_CONFIRMED
       const firstFetchTime = new Date(Date.now() + 10 * 60 * 1000);
-      await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime);
+      await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime, 6);
 
     } else {
       // Re-schedule ONE additional retry (delayed) before marking as error
@@ -218,13 +218,13 @@ function checkHtmlForFingerprint(content: string, fingerprint: string, username:
     return null;
 }
 
-export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date) {
+export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date, maxRetries: number = 5) {
   await prisma.retryQueue.create({
     data: {
       task_type: taskType,
       payload: payload,
       attempts: attempt,
-      max_retries: 5,
+      max_retries: maxRetries,
       process_after: processAfter || new Date()
     }
   });
@@ -406,8 +406,9 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
         else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000; // 1h + 5h = 6h
         else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // 6h + 18h = 24h
         else if (attempt === 4) nextFetchDelay = 24 * 60 * 60 * 1000; // 24h + 24h = 48h (Day 2)
+        else if (attempt === 5) nextFetchDelay = 24 * 60 * 60 * 1000; // 48h + 24h = 72h (Day 3)
 
-        if (attempt === 5) {
+        if (attempt === 6) {
           // Final snapshot (72h) — close the engagement loop
           try {
             await computeOutcomeScore(tweetId);
@@ -434,7 +435,7 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
         } else if (nextFetchDelay > 0) {
           const jitteredNextDelay = getJitterDelay(nextFetchDelay);
           const nextFetchDate = new Date(Date.now() + jitteredNextDelay);
-          await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate);
+          await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, attempt + 1, nextFetchDate, 6);
           logger.info({ tweetId, nextFetchDate }, "Scheduled next engagement fetch.");
         }
 
