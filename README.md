@@ -242,9 +242,10 @@ Time-series engagement tracking at fixed intervals.
 | 2 | 1 hour | Second snapshot |
 | 3 | 6 hours | Third snapshot |
 | 4 | 24 hours | Fourth snapshot |
-| 5 | 48 hours | Final snapshot + outcome scoring |
+| 5 | 48 hours | Fifth snapshot |
+| 6 | 72 hours | Final snapshot + outcome scoring |
 
-At attempt 5 (final):
+At attempt 6 (final):
 
 - Calls `computeOutcomeScore()` to create `TweetOutcome` record
 
@@ -255,26 +256,26 @@ At attempt 5 (final):
 **Cooldown:** 5-minute minimum between snapshots. Anti-bot jitter on all requests (0-2000ms).
 
 #### Customizing Tracking Intervals
-PostPilot tracks engagement over 48–72 hours by default. You can change this duration by editing `src/worker.ts`:
+PostPilot tracks engagement over 72 hours by default (6 snapshots). You can change this duration by editing `src/worker.ts`:
 
 *   **Total Tracking Days**: To track for longer (e.g., 7 days):
 
-    1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for Days 3, 4, 5, 6, and 7.
+    1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for additional days.
 
-    2.  Update the **finalization block** (`if (attempt === 5)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
+    2.  Update the **finalization block** (`if (attempt === 6)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
 
 
     ```typescript
-    // src/worker.ts (~line 288)
-    if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;         // Day 0: 10m -> 1h
+    // src/worker.ts (~line 405)
+    if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;          // Day 0: 10m -> 1h
     else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000;  // Day 0: 1h -> 6h
     else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // Day 0 -> Day 1 (24h)
     else if (attempt >= 4 && attempt < 10) {
-      nextFetchDelay = 24 * 60 * 60 * 1000;                      // Day 2, 3, 4, 5, 6, 7
+      nextFetchDelay = 24 * 60 * 60 * 1000;                       // Day 2, 3, 4, 5, 6, 7
     }
     ```
 
-*   **Important**: If you increase the number of attempts beyond 5, you must also update the `max_retries` value in the `enqueueRetry` call (around line 171) to ensure the database doesn't mark the task as failed before it finishes the 7-day cycle.
+*   **Important**: If you increase the number of attempts beyond 6, you must also update the `maxRetries` argument passed to `enqueueRetry` for `FETCH_ENGAGEMENT` (currently `6`, in two locations around lines 115 and 438) to ensure the database doesn't mark the task as failed before it finishes the cycle.
 
 ### EVOLVE_PERSONA
 
