@@ -1,7 +1,14 @@
-// 72h outcome scorer. Min-max scales raw engagement (likes×1 + retweets×3) over 30d window.
-// Tiers: top 20% high, bottom 30% low, else medium. Persists topic + time_of_day + day_of_week.
+// 72h outcome scorer. Log-scaled min-max of (likes + retweets×3 + replies×5) over 30d window.
+// Log scaling kills outlier tyranny — one viral tweet at 1000 likes no longer crushes
+// every other tweet's score to near-zero. Replies weighted highest (hardest engagement to earn).
+// Tiers: top 20% high, bottom 30% low, else medium.
+// Persists topic + time_of_day + day_of_week.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
+
+function rawEngagement(likes: number, retweets: number, replies: number): number {
+  return Math.log1p(likes + retweets * 3 + replies * 5);
+}
 
 export async function computeOutcomeScore(tweetId: string): Promise<void> {
   const engagements = await prisma.engagement.findMany({
@@ -16,7 +23,8 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
 
   const peakLikes = Math.max(...engagements.map((e) => e.likes));
   const peakRetweets = Math.max(...engagements.map((e) => e.retweets));
-  const raw = peakLikes * 1.0 + peakRetweets * 3.0;
+  const peakReplies = Math.max(...engagements.map((e) => e.replies));
+  const raw = rawEngagement(peakLikes, peakRetweets, peakReplies);
 
   // Fetch last 30 days of outcomes for min-max normalization
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60_000);
@@ -25,21 +33,19 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
     select: { outcome_score: true },
   });
 
-  // Collect all raw scores including historical normalized ones for context
   // For first tweet or single tweet, score = 50 (midpoint)
   let outcomeScore: number;
   if (recentOutcomes.length === 0) {
     outcomeScore = 50;
   } else {
-    // Compute min/max from existing raw-equivalent scores
-    // Since we store normalized, we need the raw values — recalculate from peaks
+    // Recompute log-scaled raws from historical peaks for fair comparison
     const allRaws = await prisma.tweetOutcome.findMany({
       where: { computed_at: { gte: thirtyDaysAgo } },
-      select: { peak_likes: true, peak_retweets: true },
+      select: { peak_likes: true, peak_retweets: true, peak_replies: true },
     });
 
-    const rawScores = allRaws.map((o) => o.peak_likes * 1.0 + o.peak_retweets * 3.0);
-    rawScores.push(raw); // include current
+    const rawScores = allRaws.map((o) => rawEngagement(o.peak_likes, o.peak_retweets, o.peak_replies));
+    rawScores.push(raw);
 
     const minRaw = Math.min(...rawScores);
     const maxRaw = Math.max(...rawScores);
@@ -90,6 +96,7 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
       tier,
       peak_likes: peakLikes,
       peak_retweets: peakRetweets,
+      peak_replies: peakReplies,
       quality_score: latestVersion?.quality_score ?? null,
       topic,
       time_of_day: timeOfDay,
@@ -101,6 +108,7 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
       tier,
       peak_likes: peakLikes,
       peak_retweets: peakRetweets,
+      peak_replies: peakReplies,
       quality_score: latestVersion?.quality_score ?? null,
       topic,
       time_of_day: timeOfDay,
@@ -110,7 +118,7 @@ export async function computeOutcomeScore(tweetId: string): Promise<void> {
   });
 
   logger.info(
-    { tweetId, outcomeScore: outcomeScore.toFixed(1), tier, peakLikes, peakRetweets },
+    { tweetId, outcomeScore: outcomeScore.toFixed(1), tier, peakLikes, peakRetweets, peakReplies },
     'Outcome score computed',
   );
 }

@@ -387,6 +387,7 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
 
         const likes = Number(data?.favorite_count || 0);
         const retweets = Number((data?.retweet_count || 0) + (data?.quote_count || 0));
+        const replies = Number(data?.conversation_count || 0);
 
         // Every fetch should INSERT a new row
         await prisma.engagement.create({
@@ -394,11 +395,12 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
             tweet_id: tweetId,
             likes,
             retweets,
+            replies,
             fetched_at: new Date()
           }
         });
 
-        logger.info({ tweetId, likes, retweets, attempt }, "Engagement tracking snapshot stored");
+        logger.info({ tweetId, likes, retweets, replies, attempt }, "Engagement tracking snapshot stored");
 
         // Schedule additional fetches (10m -> 1h -> 6h -> 24h -> 48h -> 72h)
         let nextFetchDelay = 0;

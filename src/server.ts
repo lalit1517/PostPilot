@@ -474,7 +474,7 @@ app.get('/api/status/:id/timeline', async (req, res) => {
       events.push({
         kind: 'ENGAGEMENT',
         at: e.fetched_at,
-        detail: { likes: e.likes, retweets: e.retweets, impressions: e.impressions }
+        detail: { likes: e.likes, retweets: e.retweets, replies: e.replies, impressions: e.impressions }
       });
     }
 

@@ -119,10 +119,12 @@ function isSuspiciousDraft(draft: string): string | null {
 
 function parseScore(raw: string): number {
   const match = (raw ?? "").match(/\d+(\.\d+)?/);
-  if (!match) return 7;
+  if (!match) return 7.0;
   const n = parseFloat(match[0]);
-  if (!Number.isFinite(n)) return 7;
-  return Math.max(1, Math.min(10, n));
+  if (!Number.isFinite(n)) return 7.0;
+  const clamped = Math.max(1, Math.min(10, n));
+  // Round to 1 decimal place (defensive — model may return 8.456)
+  return Math.round(clamped * 10) / 10;
 }
 
 function parseCritiqueHints(critique: string, draft: string, score: number): string[] {
@@ -274,11 +276,30 @@ async function contextLoader(state: typeof AgentState.State) {
 
   const trendingTopicsPromise = getTrendingTopics();
 
-  const topTweetsQuery = await prisma.engagement.findMany({
-    orderBy: { likes: 'desc' },
+  // Slot-aware exemplars: prefer top tweets posted at the same time-of-day slot.
+  // Falls back to global top-by-likes when slot has <3 samples (avoids overfitting on tiny n).
+  const SLOT_SAMPLE_THRESHOLD = 3;
+  const currentSlot = state.timeOfDay;
+  const slotOutcomes = await prisma.tweetOutcome.findMany({
+    where: { time_of_day: currentSlot },
+    orderBy: { outcome_score: 'desc' },
     take: 5,
     include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
   });
+
+  let topTweetsQuery: Array<{ tweet: { versions: Array<{ content: string }> } }>;
+  let exemplarSource: 'slot_filtered' | 'global_fallback';
+  if (slotOutcomes.length >= SLOT_SAMPLE_THRESHOLD) {
+    topTweetsQuery = slotOutcomes;
+    exemplarSource = 'slot_filtered';
+  } else {
+    topTweetsQuery = await prisma.engagement.findMany({
+      orderBy: { likes: 'desc' },
+      take: 5,
+      include: { tweet: { include: { versions: { orderBy: { version: 'desc' }, take: 1 } } } }
+    });
+    exemplarSource = 'global_fallback';
+  }
   const weightedFeedbackQuery = await prisma.feedback.findMany({
     orderBy: { weighted_score: 'desc' },
     take: 5,
@@ -347,6 +368,9 @@ async function contextLoader(state: typeof AgentState.State) {
     blacklistCount: blacklistInfo.list.length,
     blacklistSource: blacklistInfo.source,
     contextCount: context.length,
+    exemplarSource,
+    slotSampleCount: slotOutcomes.length,
+    currentSlot,
     selectedFormat: formatArchetype.name,
     recentFormatsConsidered: consideredRecentFormats,
     unusedFormatsCount: unusedCount,
@@ -708,7 +732,7 @@ A tweet that is high quality but uses an overused structure is less valuable tha
 ---END STRUCTURAL CONTEXT---
 `;
 
-  const prompt = `${state.personaParameters}\n${structuralContextBlock}\nScore the following tweet on a scale of 1 to 10 for clarity, engagement, adherence to constraints, and voice authenticity. Also provide a one-sentence critique.\n\nSCORING RULES:\n- Deduct 2 points if the tweet uses formal/literary language, metaphors, or philosophical framing that doesn't match the persona voice.\n- Reward conversational, direct, punchy tweets that sound like real dev Twitter.\n- If the tweet contains words like "indeed", "thus", "upon", "whilst", "realm", "amidst", "behold", "traverse", "ponder" — score 4 or below and mention "formal" or "literary" in the critique.\n- Deduct 3 points if the tweet makes a factual claim about a specific product launch, version number, or news event that could be outdated.\n- Apply the STRUCTURAL CONTEXT penalty above.\n\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8|Good but needs a stronger hook)`;
+  const prompt = `${state.personaParameters}\n${structuralContextBlock}\nScore the following tweet on a scale of 1.0 to 10.0 for clarity, engagement, adherence to constraints, and voice authenticity. Also provide a one-sentence critique.\n\nSCORING PRECISION:\n- Use ONE decimal place (e.g., 7.4, 8.2, 9.7). Do NOT round to whole numbers.\n- Most tweets fall between 6.0 and 9.0. Reserve 9.5+ for genuinely standout drafts and below 5.0 for clearly broken ones.\n- Differentiate similar drafts with the decimal — a "good but predictable" tweet is 7.3, a "good with a sharp hook" is 8.1, etc.\n\nSCORING RULES:\n- Deduct 2 points if the tweet uses formal/literary language, metaphors, or philosophical framing that doesn't match the persona voice.\n- Reward conversational, direct, punchy tweets that sound like real dev Twitter.\n- If the tweet contains words like "indeed", "thus", "upon", "whilst", "realm", "amidst", "behold", "traverse", "ponder" — score 4.0 or below and mention "formal" or "literary" in the critique.\n- Deduct 3 points if the tweet makes a factual claim about a specific product launch, version number, or news event that could be outdated.\n- Apply the STRUCTURAL CONTEXT penalty above.\n\nTweet:\n${state.draft}\n\nOutput format: SCORE|CRITIQUE (e.g., 8.2|Good but needs a stronger hook)`;
 
   let score = 10;
   let critique = "Skipped critique due to timeout.";
