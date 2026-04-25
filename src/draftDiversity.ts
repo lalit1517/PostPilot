@@ -1,10 +1,12 @@
 import { prisma } from './db.js';
 import { logger } from './logger.js';
+import { guessFormatFromContent } from './draftFormats.js';
 
 export const SIMILARITY_THRESHOLD = 0.65;
 export const RECENT_DRAFT_COUNT = 20;
 const STRUCTURAL_WINDOW = 5;
 const FINGERPRINT_BUFFER_SIZE = 15;
+const FORMAT_MAP_SIZE = 30;
 
 function normalize(text: string): string {
   return text
@@ -102,12 +104,6 @@ function detectPunchlineEnding(text: string): boolean {
     last.length < 30;
 }
 
-/**
- * Returns a topic-agnostic structural fingerprint capturing the SHAPE of the tweet.
- * Format: "FORMAT:<name>|OPEN:<openKind>|<ARC_TOKENS...>"
- * The FORMAT prefix is attached later by the caller when a format directive is assigned;
- * here we return the observed OPEN + arc tokens only.
- */
 export function extractStructuralFingerprint(text: string): string {
   const opening = classifyOpening(text);
   const tokens: string[] = [`OPEN:${opening}`];
@@ -118,15 +114,13 @@ export function extractStructuralFingerprint(text: string): string {
   return tokens.join('|');
 }
 
-/**
- * Combine an assigned format name with the observed structural fingerprint.
- * Used when storing fingerprints so the FORMAT rotation logic can read them back.
- */
 export function composeFingerprint(formatName: string | null, observed: string): string {
   if (!formatName) return observed;
   return `FORMAT:${formatName}|${observed}`;
 }
 
+// Ring buffer of FORMAT-prefixed fingerprints. Fast path for format rotation.
+// Lost on restart — DB fallback + format-map backfill cover that case.
 const fingerprintBuffer: string[] = [];
 
 export function pushFingerprintToBuffer(fingerprint: string): void {
@@ -145,6 +139,75 @@ export function clearFingerprintBuffer(): void {
   fingerprintBuffer.length = 0;
 }
 
+/*
+ * Format-name map. Keyed by tweetId (preferred) or content hash (fallback).
+ * Used to attach FORMAT: prefix when reading historical fingerprints from
+ * TweetVersion — the schema does not persist format_name, so we remember it
+ * in-process and heuristically backfill on restart.
+ */
+interface FormatMapEntry {
+  formatName: string;
+  registeredAt: number;
+}
+
+const formatMap = new Map<string, FormatMapEntry>();
+let backfillDone = false;
+
+export function registerDraftFormat(key: string, formatName: string): void {
+  if (!key || !formatName) return;
+  if (formatMap.has(key)) formatMap.delete(key);
+  formatMap.set(key, { formatName, registeredAt: Date.now() });
+  while (formatMap.size > FORMAT_MAP_SIZE) {
+    const oldestKey = formatMap.keys().next().value;
+    if (!oldestKey) break;
+    formatMap.delete(oldestKey);
+  }
+}
+
+export function getRegisteredFormat(key: string): string | null {
+  return formatMap.get(key)?.formatName ?? null;
+}
+
+export function clearFormatMap(): void {
+  formatMap.clear();
+  backfillDone = false;
+}
+
+/**
+ * Best-effort restoration of the format map after a restart by pattern-matching
+ * recent draft content. Runs once per process. Silently no-ops on DB error.
+ */
+async function backfillFormatMap(): Promise<void> {
+  if (backfillDone) return;
+  backfillDone = true;
+  try {
+    const recent = await prisma.tweetVersion.findMany({
+      orderBy: { created_at: 'desc' },
+      take: FORMAT_MAP_SIZE,
+      select: { tweet_id: true, content: true },
+    });
+    let recovered = 0;
+    for (const row of recent) {
+      if (formatMap.has(row.tweet_id)) continue;
+      const guess = guessFormatFromContent(row.content);
+      if (guess) {
+        formatMap.set(row.tweet_id, {
+          formatName: guess.name,
+          registeredAt: Date.now(),
+        });
+        recovered++;
+      }
+    }
+    logger.info(
+      { recovered, scanned: recent.length },
+      'draftDiversity: format map backfilled from TweetVersion',
+    );
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ err: message }, 'draftDiversity: format map backfill failed');
+  }
+}
+
 export interface DiversityReport {
   rejectionKind: 'text_similarity' | 'structural_fingerprint' | null;
   matchedFingerprint: string | null;
@@ -159,11 +222,6 @@ export interface DiversityResult {
   report: DiversityReport;
 }
 
-/**
- * Checks whether `draft` is too similar to any of the last N drafts either by
- * text trigram Jaccard (threshold SIMILARITY_THRESHOLD) or by structural
- * fingerprint match against the last STRUCTURAL_WINDOW drafts.
- */
 export async function checkDraftDiversity(
   draft: string,
   excludeTweetId?: string,
@@ -276,23 +334,41 @@ export async function checkDraftDiversity(
 }
 
 /**
- * Fetch the last N structural fingerprints from TweetVersion content (computed
- * on the fly — no schema change). Returned oldest-first so callers can append
- * in chronological order.
+ * Return FORMAT-prefixed fingerprints for the last N tweets.
+ * Merges in-memory ring buffer (fast path) with DB rows joined against the
+ * format map (slow path). Format names come from the in-process registry;
+ * rows missing a registration get a content-pattern guess so rotation still
+ * works after a restart.
  */
-export async function getRecentStructuralFingerprints(limit = FINGERPRINT_BUFFER_SIZE): Promise<string[]> {
+export async function getRecentStructuralFingerprints(
+  limit = FINGERPRINT_BUFFER_SIZE,
+): Promise<string[]> {
+  await backfillFormatMap();
   try {
     const recent = await prisma.tweetVersion.findMany({
       orderBy: { created_at: 'desc' },
       take: limit,
-      select: { content: true },
+      select: { tweet_id: true, content: true },
     });
-    return recent
-      .map((r) => extractStructuralFingerprint(r.content))
+
+    const dbFingerprints = recent
+      .map((r) => {
+        const observed = extractStructuralFingerprint(r.content);
+        const registered = getRegisteredFormat(r.tweet_id);
+        if (registered) return composeFingerprint(registered, observed);
+        const guess = guessFormatFromContent(r.content);
+        return composeFingerprint(guess?.name ?? null, observed);
+      })
       .reverse();
+
+    const combined: string[] = [...dbFingerprints];
+    for (const fp of fingerprintBuffer) {
+      if (!combined.includes(fp)) combined.push(fp);
+    }
+    return combined.slice(-limit);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn({ err: message }, 'getRecentStructuralFingerprints failed');
-    return [];
+    return [...fingerprintBuffer].slice(-limit);
   }
 }

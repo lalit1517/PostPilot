@@ -12,6 +12,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 - [Background Workers](#background-workers)
 - [API Reference](#api-reference)
 - [Database Schema](#database-schema)
+- [Customizing the Owner Profile](#customizing-the-owner-profile)
 - [Setup](#setup)
   - [Prerequisites](#prerequisites)
   - [1. Install dependencies](#1-install-dependencies)
@@ -29,7 +30,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 
 - **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API. 🔒
 
-- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety, and a **Conditional Auto-Refiner** that triggers only when quality scores are low.
+- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Two-Layer Trend Relevance Filter** (regex hard-exclude + domain keyword scoring), **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
 
 - **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance. 🧪
 
@@ -73,7 +74,7 @@ n8n (scheduler)           Telegram (notifications)
 
 1. **Orchestration** — n8n triggers generation at 08:00, 14:00, 20:00 UTC. Telegram delivers drafts with inline buttons (post, edit, feedback).
 
-2. **Intelligence** — LangGraph StateGraph with 6 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
+2. **Intelligence** — LangGraph StateGraph with 7 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
 
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution).
 
@@ -103,33 +104,37 @@ Generation (3 LLM calls max)
 | Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with min-max scaling vs 30-day window. Persists `topic`, `time_of_day`, `day_of_week` for analytics. Tiers: top 20% = high, bottom 30% = low. |
 | Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
 | Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
-| Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier (TIME_STRUGGLE / QUESTION / TAKE / CROWD_CLAIM / NUMBER / FIRST_PERSON / SECOND_PERSON / TEMPORAL_MARKER / DECLARATION / GENERIC) + arc tokens (CONTRAST / LESSON / SELF_DEPRECATE / PUNCHLINE_END). Emits a `DiversityReport` on every rejection. |
-| Draft Formats | `src/draftFormats.ts` | 0 | 8 archetypes (HOT_TAKE, QUESTION_HOOK, STORY_LESSON, CONTRARIAN_FACT, NUMBERED_INSIGHT, PERSONAL_WIN, RANT, OBSERVATION). `getNextFormat()` picks least-recently-used archetype in the last 4 fingerprints. Pure and deterministic. |
-| Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Fed into `contextLoader`. |
+| Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier + arc tokens. Emits a `DiversityReport` on every rejection. Ships an in-memory **format map** (LRU 30) and a boot-time **heuristic backfill** (`guessFormatFromContent`) so FORMAT-prefixed fingerprints survive Render restarts. |
+| Draft Formats | `src/draftFormats.ts` | 0 | 8 archetypes, each with `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, `exampleFirstSentence`. `getNextFormatWithMeta()` exposes which formats were considered + unused count for logging. Pure and deterministic. |
+| Trend Relevance | `src/trendRelevance.ts` | 0 | Two-layer filter on Trends24 output. Layer 1: regex hard-exclude (non-ASCII, politics/sports/entertainment/crypto/horoscope, <4 chars, pure numbers). Layer 2: word-boundary keyword overlap against `OWNER_PROFILE.domainKeywords` — score 0 → reject. Replaced the old naive substring filter. |
+| Topic Coherence | `src/topicCoherence.ts` | 0 | Pure-string gate that passes on (a) topic keyword overlap with draft OR (b) on-domain pivot (≥2 domain keywords). Feeds the `coherenceGate` graph node. |
+| Topic Memory | `src/topicMemory.ts` | 0 | In-memory 48h topic cooldown + per-topic coherence failure counter. Survives DB outages; DB is long-term authoritative. 3-strike rule auto-blacklists a topic. |
+| Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
-| Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`) to prevent pattern over-reinforcement. 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
+| Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
 
 
 ## 🧠 AI Agent (LangGraph)
 
-**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> [autoRefiner if score < 8] -> END`
+**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner if score < 8 OR coherence failed] -> END`
 
-**Re-roll edge:** `diversityGate -> contentGenerator` (capped at 1 re-roll; accept branch bumps `rerollCount` past the router guard so the graph cannot loop even if downstream nodes fail).
+**Re-roll edge:** `diversityGate -> personaAdapter` (capped at 1 re-roll). On rejection, a **different format archetype** is selected via `getNextFormatWithMeta()` and the rejected fingerprint + draft are persisted to state. `contentGenerator` then injects a `[STRUCTURAL RE-ROLL]` block naming the exact fingerprint and draft the model must NOT reproduce. The reroll routes through `personaAdapter` so the new format + prohibitions bake into the prompt before the retry.
 
-**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, autoRefiner, and the n8n webhook. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
+**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, coherenceGate, autoRefiner, and the n8n webhook. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Parallel fetch: top 5 tweets by likes, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, Trends24 topics filtered via `OWNER_PROFILE.trendKeywords`, `computeLengthTarget()` (avg±stdev from high-tier outcomes), `computeTopicBlacklist()` (bottom-20% topics), last 15 structural fingerprints, and `getNextFormat()` → assigned `FormatArchetype` for this run. |
-| `personaAdapter` | No | Prepends a `---FORMAT DIRECTIVE (MANDATORY)---` block BEFORE the persona identity so it overrides stylistic habits (archetype name + structure description + shape hint, explicit ban on `spent X hours` openers, dynamic contrast-arc ban when 2+ of last 3 tweets used CONTRAST). Then builds `OWNER_IDENTITY` from module-level `OWNER_PROFILE` (identity, domains, moods, tones, language, experienceVoice, cities, hobbies, slangs, avoid, trendKeywords). Injects few-shot exemplars (top 3 historical tweets), hook-first rule (first 60 chars = core claim), dynamic length target, topic blacklist, tone-by-time-of-day, learned persona, trend hint, recent-topics-to-avoid, feedback guidelines, and a `VOICE ANTI-PATTERNS` guardrail that bans literary/philosophical language, metaphors, passive voice, and filler openers. |
-| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded via `canCallLLM()`. Output passed through `finalizeDraft()`. On rate-limit, sets `rateLimited: true` on state and the new `afterContentGenerator` router short-circuits the graph straight to `END` (no diversity check, no scoring, no refining, no webhook). |
-| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts — either triggers a re-roll. On duplicate, routes back to `contentGenerator` for one re-roll; second duplicate accepted. Accepted drafts push a `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` fingerprint to the 15-slot in-memory ring buffer. Emits a full `DiversityReport` (rejection kind, matched fingerprint, same-fingerprint count in last 20) on every rejection. |
-| `qualityScorer` | Yes | Scores 1-10 via `parseScore()` with explicit voice-authenticity criteria (deducts 2 points for literary/philosophical tone). Runs `parseCritiqueHints()` to convert free-form critique into a structured hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`). Persists `quality_score` to TweetVersion. |
-| `autoRefiner` | Conditional | Rewrites if score < 8. Maps `critiqueHints` to concrete rewrite directives via `HINT_DIRECTIVES` (e.g. `weak_hook` → "REWRITE THE OPENER — first 60 chars must land the core claim"). Output gated by `isSuspiciousDraft()`; rejection keeps original. Skipped at score ≥ 8. |
+| `contextLoader` | No | Sequential DB fetch: top 5 tweets, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()` (merges DB bottom-20% with in-memory cooldown — logs `blacklistSource: 'db+memory' \| 'memory_only'`), last 15 FORMAT-prefixed structural fingerprints. Trends24 pulled in parallel (non-DB) and filtered via `filterRelevantTrends()` — regex hard-exclusion + domain keyword scoring. When zero trends survive, sets `topicFree: true` on state. Extracts `OVERUSED_STRUCTURE/ARC/PHRASE` entries from the learned persona's AVOID section into `hardProhibitions`. Selects the next `FormatArchetype` via `getNextFormatWithMeta()` and logs `{ selectedFormat, recentFormatsConsidered, unusedFormatsCount }` — rotation is verifiable from logs. |
+| `personaAdapter` | No | Builds the prompt top-down: (1) `---HARD PROHIBITIONS---` block (overused structures/arcs/phrases from persona AVOID — stated as structural violations that cause rejection), (2) `---FORMAT DIRECTIVE (MANDATORY)---` block with the archetype's `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, and `exampleFirstSentence`, ending in "Violation makes the draft invalid, the quality scorer will reject it", (3) `OWNER_IDENTITY` from `src/config/ownerProfile.ts`, (4) learned persona, few-shot exemplars, trending hint, topic-free banner (when applicable), length target, topic blacklist, tone-by-time-of-day, feedback guidelines, recency/casing rules, and the `VOICE ANTI-PATTERNS` guardrail. |
+| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded via `canCallLLM()` (returns `nextAvailableAt` timestamp on block). Cold-start fallback: when no topic + `topicFree`, picks from `OWNER_PROFILE.coldStartTopics`. Structural re-roll: when `state.rejectedFingerprint` is set, injects a block naming the exact fingerprint + draft the model must NOT reproduce. Output passed through `finalizeDraft()`. Calls `registerDraftFormat(tweetId, formatName)` so future fingerprint reads attach the FORMAT: prefix. On rate-limit, sets `rateLimited: true` and the graph short-circuits to `END`. |
+| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. |
+| `qualityScorer` | Yes | Prompt now opens with a `---STRUCTURAL CONTEXT FOR SCORING---` block naming the draft's fingerprint, its count in recent history, and explicit penalty rules (-1 at 2+ matches, -2 at 4+). Scores 1-10 via `parseScore()` with voice-authenticity criteria. Runs `parseCritiqueHints()` → fixed hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`, plus `topic_drift` added by coherenceGate). Persists `quality_score` to TweetVersion. |
+| `coherenceGate` | No | Pure-string check via `checkTopicCoherence()`. Passes when topic is empty, or draft shares a topic keyword, or draft has ≥2 domain keywords (on-domain pivot). On mismatch: increments per-topic failure counter, degrades a high score to 6 to force a refiner pass, appends `topic_drift` to hints. At 3 strikes, auto-blacklists the topic via `recordTopicUsed`. |
+| `autoRefiner` | Conditional | Runs when score < 8 OR coherence failed. Reuses `state.personaParameters` (carries HARD PROHIBITIONS + FORMAT DIRECTIVE at top) and tells the model it MUST still obey those constraints on rewrite. Maps hints → `HINT_DIRECTIVES` (e.g. `topic_drift` → "TOPIC GROUNDING — draft must explicitly reference topic X, if irrelevant, acknowledge and pivot"). Output gated by `isSuspiciousDraft()`; rejection keeps original. |
 
 
-**Owner Identity (`OWNER_PROFILE`)**: Single module-level object in `src/agent.ts`. Edit arrays (domains, moods, tones, language, hobbies, slangs, trendKeywords, avoid, cities, experienceVoice, identity) to reshape voice — trend filter and persona prompt both rebuild automatically.
+**Owner Identity (`OWNER_PROFILE`)**: **Single source of truth at [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts)**. Every file that needs owner context imports from there. No env-var overrides by design — one file, one source, zero ambiguity. `.env` is only for secrets + infra. To clone PostPilot for a different persona: edit this file, commit, deploy. See [Customizing the Owner Profile](#customizing-the-owner-profile) for the per-field guide.
 
 **Draft safety helpers** (pure computation, zero extra LLM calls):
 
@@ -143,13 +148,21 @@ Generation (3 LLM calls max)
 
 - `computeLengthTarget()` — derives `{min, max}` length window from last 20 high-tier `TweetOutcome` rows (avg±stdev). Returns `null` if <5 samples.
 
-- `computeTopicBlacklist()` — bottom-20% topics from `getTopicPerformance(50)`. Returns `[]` if <10 topic samples.
+- `computeTopicBlacklist()` — merges DB bottom-20% topics with the in-memory cooldown list from `topicMemory.ts`. On DB failure, returns memory-only instead of `[]`. Logs `blacklistSource`.
 
-- `extractStructuralFingerprint(text)` — topic-agnostic shape fingerprint (`OPEN:<kind>|CONTRAST|LESSON|SELF_DEPRECATE|PUNCHLINE_END`). No hardcoded topics or keywords — classifies openings via structural regex only.
+- `extractAvoidItems(profileText)` — parses `OVERUSED_STRUCTURE:` / `OVERUSED_ARC:` / `OVERUSED_PHRASE:` from the persona AVOID section into structured hard prohibitions.
 
-- `getNextFormat(recentFingerprints)` — pure, deterministic LRU archetype selector over 8 archetypes; falls back to hash-seeded deterministic pick when all formats were used in the last 4 tweets.
+- `extractStructuralFingerprint(text)` — topic-agnostic shape fingerprint (`OPEN:<kind>|CONTRAST|LESSON|SELF_DEPRECATE|PUNCHLINE_END`). Structural regex only, no hardcoded topics.
 
-- `composeFingerprint(formatName, observed)` / `pushFingerprintToBuffer(fp)` / `getRecentStructuralFingerprints(n)` — fingerprint plumbing. Ring buffer is in-memory (no schema change); DB fallback derives fingerprints on the fly from `TweetVersion.content`.
+- `getNextFormatWithMeta(recentFingerprints)` — pure, deterministic LRU archetype selector over 8 archetypes. Returns `{ selected, unusedCount, consideredRecentFormats }` so rotation is loggable.
+
+- `composeFingerprint(formatName, observed)` / `pushFingerprintToBuffer(fp)` / `registerDraftFormat(tweetId, name)` / `getRecentStructuralFingerprints(n)` — fingerprint plumbing. Ring buffer in-memory; on restart, a boot-time `backfillFormatMap()` scans recent `TweetVersion` rows and calls `guessFormatFromContent()` heuristically so FORMAT-prefixed fingerprints survive Render restarts without a schema migration.
+
+- `checkTopicCoherence(draft, topic)` — pure-string coherence check. Passes on topic keyword overlap OR on-domain pivot (≥2 domain keywords in draft).
+
+- `recordTopicUsed(topic)` / `isTopicOnCooldown(topic)` / `getInMemoryBlacklist()` / `incrementCoherenceFailure(topic)` — in-memory 48h cooldown + 3-strike coherence counter.
+
+- `filterRelevantTrends(trends)` — two-layer trend filter. Returns `{ relevant, excluded }` with per-trend rejection reason.
 
 **Models:** `gemini-2.5-flash` (primary, `thinkingBudget: 1024`) -> `gemini-3.1-flash-lite-preview` -> `gemini-3-flash-preview` -> `gemini-2.5-flash-lite` (fallbacks)
 
@@ -313,6 +326,45 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 
 
+## 👤 Customizing the Owner Profile
+
+All persona configuration lives in **one file**: [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts). Edit the fields, commit, deploy. There are no env-var overrides for these values by design — one file, one source, zero ambiguity. `.env` stays for secrets and infra only (DB URL, API keys, Telegram token).
+
+| Field | Used by | What it does |
+| :--- | :--- | :--- |
+| `username` | worker scraping, fingerprint resolution | Your X handle (without @). Must match the `X_USERNAME` in `.env`. |
+| `identity` | `personaAdapter` prompt | One-line "you are…" statement at the top of the persona block. |
+| `domains` | `personaAdapter` prompt | High-level topic descriptions injected into the persona. |
+| `domainKeywords` | `trendRelevance.ts`, `topicCoherence.ts` | **Flat lowercase keyword list.** Drives the trend relevance filter (word-boundary match — score 0 → reject) and the coherence gate (≥2 matches in the draft = on-domain pivot). Add broadly — "ai" won't match "brain" because the filter uses word boundaries. |
+| `moods` / `tones` / `language` | persona prompt | Style flavor lists. |
+| `experienceVoice` | persona prompt | One-line experience anchor. |
+| `cities` / `hobbies` / `slangs` | persona prompt | Personality flavor. Slangs are sparingly applied (1 per tweet max). |
+| `avoid` | persona prompt | Hard topic bans. The agent never tweets about these. |
+| `trendKeywords` | legacy, kept for back-compat | Older broader list. Real relevance filter uses `domainKeywords`. |
+| `voiceSeed` | `personaEvolver.ts` | Voice anchor used when the LLM evolves the persona — replaces the old hardcoded "GenZ Indian dev" string. |
+| `preferredLength` | length target seed | `'short' \| 'medium' \| 'long'`. Soft hint until enough outcome data exists for `computeLengthTarget()` to derive a real range. |
+| `tweetLanguages` | `trendRelevance.ts` | ISO 639-1 codes. When `'en'` is in the list, non-ASCII trends are dropped (the fix for the Turkish-holiday-passes-as-relevant bug). |
+| `coldStartTopics` | `contentGenerator` cold-start fallback | See below. |
+
+### When `coldStartTopics` are used
+
+The agent normally pulls a topic from one of three places: the trending list (Trends24), a topic supplied to `/api/generate`, or your historical persona data. `coldStartTopics` is the **safety net** — used only when **all three fail at the same time**:
+
+- Trends24 returns 0 items OR every trend gets dropped by `filterRelevantTrends` (e.g. all trends are non-English / sports / politics)
+- AND no `topic` was supplied to the generation request
+- AND `state.topicFree` is set to `true` by `contextLoader`
+
+In that case, `contentGenerator` calls `pickColdStartTopic(recentTopics, blacklist)` which:
+
+1. Filters the pool to topics not in `recentTopics` AND not on the in-memory cooldown blacklist
+2. Picks one at random from the eligible subset (or the full pool if everything is on cooldown)
+3. Logs `{ coldStartTopic }` so you can see which one fired
+4. Hands the topic to the LLM as a normal generation input
+
+**What to put in the list:** evergreen topics you'd genuinely tweet about with no news hook. Opinions you've held for months, observations you've made ten times, the stuff you'd mention at a meetup without prep. Avoid anything that goes stale (specific product launches, version numbers, "just released" framing). The default list is dev-flavored — replace it with your own when cloning.
+
+If the list is empty, the LLM gets a generic "generate a topic from your domains" prompt and rolls the dice. Keeping the list populated prevents the random-content failure mode.
+
 ## ⚙️ Setup
 
 ### Prerequisites
@@ -340,9 +392,9 @@ npm install
 
 ### 2. Configure environment
 
+> **Persona configuration lives in [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts), NOT in `.env`.** See [Customizing the Owner Profile](#customizing-the-owner-profile). `.env` is only for secrets and infra.
 
-
-Create `.env` in the project root:
+Create `.env` in the project root (use `.env.example` as a template):
 
 ```env
 DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&pool_timeout=60&connect_timeout=15&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
@@ -667,7 +719,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Decoupled Scraping**: Tracking via Nitter + public Syndication API. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
-- **Content Diversity Gate**: Dual-layer check (trigram Jaccard + structural fingerprint) plus LRU rotation across 8 format archetypes. Protects against shadowbans and same-shape pattern decay.
+- **Content Diversity Gate**: Dual-layer check (trigram Jaccard + FORMAT-prefixed structural fingerprint) plus LRU rotation across 8 format archetypes with hard banned-opening lists. Survives Render restarts via heuristic format-map backfill (no schema migration). Protects against shadowbans and same-shape pattern decay.
 
 ## ⚖️ Hard Constraints
 
@@ -679,6 +731,6 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 
-- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → [autoRefiner] → END`. Re-roll edge: `diversityGate → contentGenerator` (capped at 1).
+- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → coherenceGate → [autoRefiner if score<8 OR coherence failed] → END`. Re-roll edge: `diversityGate → personaAdapter → contentGenerator` (capped at 1; new format archetype + rejected fingerprint injected into the retry prompt).
 
 
