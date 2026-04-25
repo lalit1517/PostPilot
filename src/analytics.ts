@@ -1,3 +1,5 @@
+// Outcome analytics — engagement pattern, topic leaderboard, quality↔outcome Pearson r.
+// Pure DB aggregation, zero LLM cost. Powers /api/admin/* dashboards.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 

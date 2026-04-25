@@ -1,3 +1,5 @@
+// Express API + monolith entrypoint. Async /api/generate, Telegram webhook, admin endpoints.
+// Starts the in-process worker after the DB accepts a probe query. See CLAUDE.md §3.
 import 'dotenv/config';
 import express from 'express';
 import crypto from 'crypto';
