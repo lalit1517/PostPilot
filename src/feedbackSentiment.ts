@@ -1,3 +1,5 @@
+// Regex/keyword feedback sentiment classifier. Zero LLM cost.
+// Multipliers consumed by feedbackWeighter (positive 1.2, negative 1.3, stylistic 1.0, neutral 0.8).
 export type FeedbackSentiment = 'positive' | 'negative' | 'stylistic' | 'neutral';
 
 interface SentimentResult {

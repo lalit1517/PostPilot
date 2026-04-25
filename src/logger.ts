@@ -1,3 +1,5 @@
+// Pino logger with pino-pretty transport. LOG_LEVEL env override (default 'info').
+// All log lines use { key: value } object format for Grafana parsability.
 import pino from 'pino';
 
 export const logger = pino({

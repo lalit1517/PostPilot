@@ -1,12 +1,5 @@
-/*
- * CHANGES (pool exhaustion fixes):
- * - N+1 outcome query → ONE findMany across the full feedback date-range,
- *   then in-memory filter per feedback (±3 days).
- * - Per-row updates → single $transaction batch (1 checkout, not N).
- * - Size guard: cap to 100 most recent feedbacks to bound query time.
- * - Mutex: isReweighting flag prevents concurrent runs from 6h schedule
- *   and end-of-attempt-5 engagement trigger both firing (double exhaustion).
- */
+// Reweights feedback by nearby tweet outcomes (±3d), recency decay, and sentiment multiplier.
+// One outcome findMany + $transaction batch update; mutex guards concurrent runs.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { classifyFeedback, sentimentWeight } from './feedbackSentiment.js';

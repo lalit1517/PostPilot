@@ -1,3 +1,5 @@
+// 72h outcome scorer. Min-max scales raw engagement (likes×1 + retweets×3) over 30d window.
+// Tiers: top 20% high, bottom 30% low, else medium. Persists topic + time_of_day + day_of_week.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 
