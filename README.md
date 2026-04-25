@@ -85,13 +85,15 @@ PostPilot improves its own writing over time without manual tuning.
 
 ```
 Generation (3 LLM calls max)
-  -> qualityScorer persists quality_score to TweetVersion
-  -> Engagement tracked at 10m, 1h, 6h, 24h, 48h, 72h
+  -> contextLoader pulls slot-aware exemplars (top tweets at THIS time-of-day)
+  -> qualityScorer persists quality_score (1.0-10.0, 1 dp) to TweetVersion
+  -> Engagement tracked at 10m, 1h, 6h, 24h, 48h, 72h (likes + retweets + replies)
   -> At 72h: computeOutcomeScore() -> TweetOutcome record
+       (log-scaled raw = log1p(likes + retweets×3 + replies×5), min-max vs 30d window)
   -> reweightFeedback() -> updates Feedback.weighted_score
   -> If 5+ high-tier tweets since last evolution -> enqueue EVOLVE_PERSONA
   -> evolvePersona() (1 LLM call, 22h cooldown) -> new PersonaProfile
-  -> Next generation picks up: weighted feedback + learned persona
+  -> Next generation picks up: slot-aware exemplars + weighted feedback + learned persona
 ```
 
 
@@ -101,7 +103,7 @@ Generation (3 LLM calls max)
 
 | Module | File | LLM Calls | Purpose |
 | :--- | :--- | :--- | :--- |
-| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with min-max scaling vs 30-day window. Persists `topic`, `time_of_day`, `day_of_week` for analytics. Tiers: top 20% = high, bottom 30% = low. |
+| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with **log-scaled** min-max vs 30-day window. Raw formula: `log1p(peak_likes + peak_retweets × 3 + peak_replies × 5)` — replies weighted highest (hardest engagement to earn), log scaling kills outlier tyranny so one viral tweet doesn't crush every other score to zero. Persists `topic`, `time_of_day`, `day_of_week`, `peak_replies` for analytics. Tiers: top 20% = high, bottom 30% = low. |
 | Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
 | Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
 | Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier + arc tokens. Emits a `DiversityReport` on every rejection. Ships an in-memory **format map** (LRU 30) and a boot-time **heuristic backfill** (`guessFormatFromContent`) so FORMAT-prefixed fingerprints survive Render restarts. |
@@ -125,11 +127,11 @@ Generation (3 LLM calls max)
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Sequential DB fetch: top 5 tweets, weighted feedback (fallback to unweighted if < 3), active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()` (merges DB bottom-20% with in-memory cooldown — logs `blacklistSource: 'db+memory' \| 'memory_only'`), last 15 FORMAT-prefixed structural fingerprints. Trends24 pulled in parallel (non-DB) and filtered via `filterRelevantTrends()` — regex hard-exclusion + domain keyword scoring. When zero trends survive, sets `topicFree: true` on state. Extracts `OVERUSED_STRUCTURE/ARC/PHRASE` entries from the learned persona's AVOID section into `hardProhibitions`. Selects the next `FormatArchetype` via `getNextFormatWithMeta()` and logs `{ selectedFormat, recentFormatsConsidered, unusedFormatsCount }` — rotation is verifiable from logs. |
+| `contextLoader` | No | Sequential DB fetch: **slot-aware exemplars** (top 5 tweets from `TweetOutcome` filtered by `time_of_day = currentSlot` ordered by `outcome_score`, with global fallback to top-5 by raw likes when slot has <3 samples — logs `exemplarSource: 'slot_filtered' \| 'global_fallback'` + `slotSampleCount` so the agent learns morning-style for morning posts and night-style for night posts), weighted feedback (fallback to unweighted if < 3), active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()` (merges DB bottom-20% with in-memory cooldown — logs `blacklistSource: 'db+memory' \| 'memory_only'`), last 15 FORMAT-prefixed structural fingerprints. Trends24 pulled in parallel (non-DB) and filtered via `filterRelevantTrends()` — regex hard-exclusion + domain keyword scoring. When zero trends survive, sets `topicFree: true` on state. Extracts `OVERUSED_STRUCTURE/ARC/PHRASE` entries from the learned persona's AVOID section into `hardProhibitions`. Selects the next `FormatArchetype` via `getNextFormatWithMeta()` and logs `{ selectedFormat, recentFormatsConsidered, unusedFormatsCount }` — rotation is verifiable from logs. |
 | `personaAdapter` | No | Builds the prompt top-down: (1) `---HARD PROHIBITIONS---` block (overused structures/arcs/phrases from persona AVOID — stated as structural violations that cause rejection), (2) `---FORMAT DIRECTIVE (MANDATORY)---` block with the archetype's `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, and `exampleFirstSentence`, ending in "Violation makes the draft invalid, the quality scorer will reject it", (3) `OWNER_IDENTITY` from `src/config/ownerProfile.ts`, (4) learned persona, few-shot exemplars, trending hint, topic-free banner (when applicable), length target, topic blacklist, tone-by-time-of-day, feedback guidelines, recency/casing rules, and the `VOICE ANTI-PATTERNS` guardrail. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded via `canCallLLM()` (returns `nextAvailableAt` timestamp on block). Cold-start fallback: when no topic + `topicFree`, picks from `OWNER_PROFILE.coldStartTopics`. Structural re-roll: when `state.rejectedFingerprint` is set, injects a block naming the exact fingerprint + draft the model must NOT reproduce. Output passed through `finalizeDraft()`. Calls `registerDraftFormat(tweetId, formatName)` so future fingerprint reads attach the FORMAT: prefix. On rate-limit, sets `rateLimited: true` and the graph short-circuits to `END`. |
 | `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. |
-| `qualityScorer` | Yes | Prompt now opens with a `---STRUCTURAL CONTEXT FOR SCORING---` block naming the draft's fingerprint, its count in recent history, and explicit penalty rules (-1 at 2+ matches, -2 at 4+). Scores 1-10 via `parseScore()` with voice-authenticity criteria. Runs `parseCritiqueHints()` → fixed hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`, plus `topic_drift` added by coherenceGate). Persists `quality_score` to TweetVersion. |
+| `qualityScorer` | Yes | Prompt now opens with a `---STRUCTURAL CONTEXT FOR SCORING---` block naming the draft's fingerprint, its count in recent history, and explicit penalty rules (-1 at 2+ matches, -2 at 4+). Scores **1.0-10.0 with one decimal of precision** (e.g. 7.4, 8.2, 9.7) via `parseScore()` — model is instructed to differentiate similar drafts via the decimal and parser defensively rounds to 1 dp. Voice-authenticity criteria enforced. Runs `parseCritiqueHints()` → fixed hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`, plus `topic_drift` added by coherenceGate). Persists `quality_score` to TweetVersion. |
 | `coherenceGate` | No | Pure-string check via `checkTopicCoherence()`. Passes when topic is empty, or draft shares a topic keyword, or draft has ≥2 domain keywords (on-domain pivot). On mismatch: increments per-topic failure counter, degrades a high score to 6 to force a refiner pass, appends `topic_drift` to hints. At 3 strikes, auto-blacklists the topic via `recordTopicUsed`. |
 | `autoRefiner` | Conditional | Runs when score < 8 OR coherence failed. Reuses `state.personaParameters` (carries HARD PROHIBITIONS + FORMAT DIRECTIVE at top) and tells the model it MUST still obey those constraints on rewrite. Maps hints → `HINT_DIRECTIVES` (e.g. `topic_drift` → "TOPIC GROUNDING — draft must explicitly reference topic X, if irrelevant, acknowledge and pivot"). Output gated by `isSuspiciousDraft()`; rejection keeps original. |
 
@@ -242,9 +244,10 @@ Time-series engagement tracking at fixed intervals.
 | 2 | 1 hour | Second snapshot |
 | 3 | 6 hours | Third snapshot |
 | 4 | 24 hours | Fourth snapshot |
-| 5 | 48 hours | Final snapshot + outcome scoring |
+| 5 | 48 hours | Fifth snapshot |
+| 6 | 72 hours | Final snapshot + outcome scoring |
 
-At attempt 5 (final):
+At attempt 6 (final):
 
 - Calls `computeOutcomeScore()` to create `TweetOutcome` record
 
@@ -255,26 +258,26 @@ At attempt 5 (final):
 **Cooldown:** 5-minute minimum between snapshots. Anti-bot jitter on all requests (0-2000ms).
 
 #### Customizing Tracking Intervals
-PostPilot tracks engagement over 48–72 hours by default. You can change this duration by editing `src/worker.ts`:
+PostPilot tracks engagement over 72 hours by default (6 snapshots). You can change this duration by editing `src/worker.ts`:
 
 *   **Total Tracking Days**: To track for longer (e.g., 7 days):
 
-    1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for Days 3, 4, 5, 6, and 7.
+    1.  In `fetchTweetEngagement`, add more `else if (attempt === X)` blocks to define the delays for additional days.
 
-    2.  Update the **finalization block** (`if (attempt === 5)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
+    2.  Update the **finalization block** (`if (attempt === 6)`) to match your new final attempt number (e.g., `if (attempt === 10)`).
 
 
     ```typescript
-    // src/worker.ts (~line 288)
-    if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;         // Day 0: 10m -> 1h
+    // src/worker.ts (~line 405)
+    if (attempt === 1) nextFetchDelay = 50 * 60 * 1000;          // Day 0: 10m -> 1h
     else if (attempt === 2) nextFetchDelay = 5 * 60 * 60 * 1000;  // Day 0: 1h -> 6h
     else if (attempt === 3) nextFetchDelay = 18 * 60 * 60 * 1000; // Day 0 -> Day 1 (24h)
     else if (attempt >= 4 && attempt < 10) {
-      nextFetchDelay = 24 * 60 * 60 * 1000;                      // Day 2, 3, 4, 5, 6, 7
+      nextFetchDelay = 24 * 60 * 60 * 1000;                       // Day 2, 3, 4, 5, 6, 7
     }
     ```
 
-*   **Important**: If you increase the number of attempts beyond 5, you must also update the `max_retries` value in the `enqueueRetry` call (around line 171) to ensure the database doesn't mark the task as failed before it finishes the 7-day cycle.
+*   **Important**: If you increase the number of attempts beyond 6, you must also update the `maxRetries` argument passed to `enqueueRetry` for `FETCH_ENGAGEMENT` (currently `6`, in two locations around lines 115 and 438) to ensure the database doesn't mark the task as failed before it finishes the cycle.
 
 ### EVOLVE_PERSONA
 
@@ -317,8 +320,8 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
-| `Engagement` | Time-series snapshots — likes, retweets, impressions at each interval |
-| `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
+| `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. (`impressions` column exists but is always 0 — Twitter's public syndication endpoint doesn't expose it; left in schema as a future hook.) |
+| `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics (`peak_likes`, `peak_retweets`, `peak_replies`), `quality_score` copy, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
 | `PersonaProfile` | Versioned persona documents with auto-increment version and `is_active` flag |
 | `LlmCallLog` | Rate limiting ledger with `called_at` index, pruned to 48h window |
 | `RetryQueue` | Task queue — RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA |
@@ -397,12 +400,12 @@ npm install
 Create `.env` in the project root (use `.env.example` as a template):
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&pool_timeout=60&connect_timeout=15&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&pool_timeout=60&connect_timeout=30&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
                                        # Supabase transaction pooler (port 6543) for Prisma runtime.
                                        # Stability params (ALL required, see src/db.ts comment block):
                                        #   connection_limit=1            — single serialized socket; eliminates pool-state bugs for this workload (3 tweets/day, no concurrency)
                                        #   pool_timeout=60                — wait up to 60s for the single slot (covers contextLoader's Promise.all(9) queueing end-to-end)
-                                       #   connect_timeout=15             — boot-time guard against Supavisor cold-start P1001
+                                       #   connect_timeout=30             — Supabase-recommended; absorbs cross-region Supavisor handshake jitter without false P1001
                                        #   tcp_keepalives_idle=60         — OS-level TCP keepalive every 60s
                                        #   tcp_keepalives_interval=10     — probe retry every 10s if idle
                                        #   tcp_keepalives_count=5         — 5 failed probes = dead socket
@@ -568,7 +571,7 @@ PostPilot runs in **single-connection mode** (`connection_limit=1`) with **expli
 
 **How it works** (see [`src/db.ts`](src/db.ts), [`src/agent.ts`](src/agent.ts) `contextLoader`):
 
-1. **Connection-string params** — `connection_limit=1`, `pool_timeout=60`, `connect_timeout=15`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
+1. **Connection-string params** — `connection_limit=1`, `pool_timeout=60`, `connect_timeout=30`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
 2. **Retry-once middleware** — on `P1001 / P1002 / P1008 / P1017` or `"Can't reach database" / "Server has closed" / ECONNREFUSED / ETIMEDOUT`, waits 1.5s and retries the query once. The Prisma engine reconnects transparently on the retry call — no manual `$disconnect()` (which would nuke the only connection and block every other caller).
 3. **`ensureDbReady()`** — probes with one retry before `contextLoader`'s query sequence, so a cold socket reconnects on one probe rather than on the first real query.
 4. **Sequential loading in `contextLoader`** — the 8 DB-touching reads run as explicit `await`s instead of `Promise.all`. On a 1-slot pool `Promise.all` is a lie (queries serialize anyway), and when one query stalls, a fake-parallel fan-out blocks every subsequent request (e.g. `/api/generate`'s `tweet.create()`) with `P2024`. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
