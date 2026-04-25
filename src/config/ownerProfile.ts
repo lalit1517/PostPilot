@@ -16,7 +16,6 @@ export interface OwnerProfileShape {
   hobbies: string[];
   slangs: string[];
   avoid: string[];
-  trendKeywords: string[];
   voiceSeed: string;
   preferredLength: PreferredLength;
   tweetLanguages: string[];
@@ -109,17 +108,6 @@ export const OWNER_PROFILE: OwnerProfileShape = {
   avoid: [
     'politics', 'sports', 'entertainment gossip', 'finance/crypto hype',
     'motivational fluff without substance', 'topics unrelated to tech/AI/dev',
-  ],
-
-  // Legacy broader trend keyword list — kept for back-compat. The real
-  // relevance filter uses `domainKeywords` above.
-  trendKeywords: [
-    'ai', 'llm', 'gpt', 'claude', 'gemini', 'openai', 'anthropic', 'machine learning', 'ml',
-    'react', 'nextjs', 'typescript', 'javascript', 'frontend', 'tailwind', 'css', 'ui', 'ux',
-    'fullstack', 'full stack', 'web dev', 'developer', 'programming', 'coding', 'software', 'engineer',
-    'node', 'api', 'backend', 'database', 'prisma', 'supabase', 'postgres',
-    'startup', 'saas', 'product', 'indie hacker', 'build in public', 'ship', 'side project',
-    'tech', 'devtools', 'open source', 'github', 'cursor', 'vscode',
   ],
 
   // Short voice anchor used by personaEvolver when generating profile text.

@@ -74,7 +74,14 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 
   try {
     const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
-    if (!tweet || tweet.posted) return;
+    if (!tweet) return;
+    // Skip if already resolved (live_url set on real Nitter match) or already
+    // marked failed. Do NOT skip on `posted=true` alone — the manual `✅ Posted`
+    // button sets `posted=true` optimistically before resolution runs, so that
+    // guard would silently drop every manual-confirm task and never revert the
+    // Telegram button on a real failure.
+    if (tweet.live_url) return;
+    if (tweet.status === 'RESOLVE_FAILED') return;
     if (!tweet.fingerprint) throw new Error("No fingerprint found for tweet");
 
     logger.info({ tweetId, username, attempt }, "Polling for posted tweet");

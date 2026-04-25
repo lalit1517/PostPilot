@@ -52,6 +52,7 @@ export function getInMemoryBlacklist(): string[] {
   return recentTopics.map((e) => e.topic);
 }
 
+/** @internal Test helper. Resets cooldown list + coherence counter. */
 export function clearTopicMemory(): void {
   recentTopics.length = 0;
   coherenceFailureCounter.clear();

@@ -903,11 +903,3 @@ const workflow = new StateGraph(AgentState)
   .addEdge("autoRefiner", END);
 
 export const agentGraph = workflow.compile();
-
-// Side-effect: after refiner ends, record topic usage. LangGraph's END is terminal
-// so we hook via a wrapper at node completion of autoRefiner — simplest is to call
-// recordTopicUsed inside shouldRefine when routing to END. Handled above.
-// For the autoRefiner → END path, we record here:
-export function recordFinalTopicUsage(topic: string): void {
-  if (topic) recordTopicUsed(topic);
-}
