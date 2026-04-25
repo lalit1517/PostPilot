@@ -1,14 +1,5 @@
-/*
- * CHANGES (P1001 hardening + query burst reduction):
- * - canCallLLM() catches DB errors and FAILS OPEN (allows call) — a transient
- *   connection blip must not block the whole generation pipeline. The worst
- *   case is one extra LLM call; upstream Gemini will 429 anyway if we're over.
- * - Merged 2 count queries into 1 findMany(last-24h) + in-memory filter.
- *   Cuts pool checkouts per LLM call from 2 to 1.
- * - In-memory 5s cache on the 24h fetch so rapid back-to-back calls share one
- *   DB hit instead of hammering Supavisor.
- * - recordLLMCall invalidates cache so fresh data is read on next canCallLLM.
- */
+// LLM rate guard (RPM/RPD). Fails OPEN on DB error — Gemini 429 handles overrun.
+// One findMany(24h) + 5s cache + in-memory window counts.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 
@@ -49,16 +40,46 @@ function countWindows(rows: LogRow[], now: number): { rpm: number; rpd: number }
   return { rpm, rpd: rows.length };
 }
 
-export async function canCallLLM(): Promise<{ allowed: boolean; reason?: string }> {
+function nextAvailableFromRows(rows: LogRow[], now: number): { rpmAvailableAt: Date; rpdAvailableAt: Date } {
+  const oneMinuteAgo = now - 60_000;
+  const oneDayAgo = now - 24 * 60 * 60_000;
+  // RPM window frees up when the oldest call in the last minute ages out.
+  const rpmRows = rows.filter((r) => r.called_at.getTime() >= oneMinuteAgo);
+  const rpmOldest = rpmRows.reduce<number>(
+    (min, r) => Math.min(min, r.called_at.getTime()),
+    now,
+  );
+  const rpmAvailableAt = new Date(rpmOldest + 60_000);
+
+  const rpdOldest = rows.reduce<number>(
+    (min, r) => (r.called_at.getTime() >= oneDayAgo ? Math.min(min, r.called_at.getTime()) : min),
+    now,
+  );
+  const rpdAvailableAt = new Date(rpdOldest + 24 * 60 * 60_000);
+  return { rpmAvailableAt, rpdAvailableAt };
+}
+
+export async function canCallLLM(): Promise<{ allowed: boolean; reason?: string; nextAvailableAt?: string }> {
   try {
     const rows = await getRecentLogs();
-    const { rpm, rpd } = countWindows(rows, Date.now());
+    const now = Date.now();
+    const { rpm, rpd } = countWindows(rows, now);
 
     if (rpm >= RPM_LIMIT) {
-      return { allowed: false, reason: `RPM limit reached (${rpm}/${RPM_LIMIT})` };
+      const { rpmAvailableAt } = nextAvailableFromRows(rows, now);
+      return {
+        allowed: false,
+        reason: `RPM limit reached (${rpm}/${RPM_LIMIT}). Next slot ~${rpmAvailableAt.toISOString()}`,
+        nextAvailableAt: rpmAvailableAt.toISOString(),
+      };
     }
     if (rpd >= RPD_LIMIT) {
-      return { allowed: false, reason: `RPD limit reached (${rpd}/${RPD_LIMIT})` };
+      const { rpdAvailableAt } = nextAvailableFromRows(rows, now);
+      return {
+        allowed: false,
+        reason: `RPD limit reached (${rpd}/${RPD_LIMIT}). Next slot ~${rpdAvailableAt.toISOString()}`,
+        nextAvailableAt: rpdAvailableAt.toISOString(),
+      };
     }
     return { allowed: true };
   } catch (err: unknown) {
