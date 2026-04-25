@@ -1,3 +1,6 @@
+// Handles the generation and extraction of invisible fingerprints for content attribution.
+// Encodes unique 32-bit identifiers into zero-width sequences to track text content sources.
+
 import * as crypto from 'crypto';
 import { prisma } from './db.js';
 
@@ -70,7 +73,7 @@ export function appendFingerprint(content: string, invisibleFingerprint: string)
 export function extractFingerprintHex(tweetContent: string): string | null {
   const invisibleChars = Object.keys(REVERSE_MAP);
   let binaryStr = '';
-  
+
   for (let i = 0; i < tweetContent.length; i++) {
     const char = tweetContent.charAt(i);
     if (invisibleChars.includes(char)) {

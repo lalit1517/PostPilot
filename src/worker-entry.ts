@@ -1,3 +1,5 @@
+// Standalone worker bootstrap (used by `npm run worker`). The monolith path runs runWorker()
+// from server.ts; this entry exists only for split-process deploys. Probes DB before starting.
 import 'dotenv/config';
 import { prisma } from './db.js';
 import { logger } from './logger.js';

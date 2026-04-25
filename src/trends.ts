@@ -6,8 +6,10 @@ interface TrendCache {
 }
 
 let cache: TrendCache | null = null;
+let consecutiveZeroFetches = 0;
 const CACHE_TTL_MS = 30 * 60_000;
 const FETCH_TIMEOUT_MS = 8_000;
+const ZERO_FETCH_ALERT_THRESHOLD = 3;
 
 const TRENDS24_URL = 'https://trends24.in/';
 
@@ -60,10 +62,21 @@ export async function getTrendingTopics(): Promise<string[]> {
     const trends = parseTrends(html);
 
     if (trends.length === 0) {
-      logger.warn('Trends24 parsed zero items; layout may have changed');
+      consecutiveZeroFetches++;
+      if (consecutiveZeroFetches >= ZERO_FETCH_ALERT_THRESHOLD) {
+        logger.error(
+          { consecutiveZeroFetches },
+          'CRITICAL: Trends24 parser returning 0 items for N consecutive fetches — site layout may have changed, check trends.ts parseTrends() regex',
+        );
+        // Drop stale cache so next request retries fresh.
+        cache = null;
+      } else {
+        logger.warn({ consecutiveZeroFetches }, 'Trends24 parsed zero items; layout may have changed');
+      }
       return cache?.trends ?? [];
     }
 
+    consecutiveZeroFetches = 0;
     cache = { fetched_at: Date.now(), trends };
     logger.info({ count: trends.length }, 'Trends24 refreshed');
     return trends;

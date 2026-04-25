@@ -1,14 +1,5 @@
-/*
- * Worker scheduler.
- * - isConnectionError() distinguishes transient DB failures from logic errors.
- * - processWorkerTick() returns { ok, connectionError } so scheduler can branch.
- * - Connection errors → fixed 15s wait, reset delay (no exponential amplification
- *   of rapid retries that trip Supabase's IP circuit breaker).
- * - Logic errors → exponential backoff.
- * - No pre-tick SELECT 1 health check — db.ts middleware retries transient
- *   P1001 transparently. A pre-flight ping on a 1-slot pool was pure
- *   contention with real work.
- */
+// Background worker (60s tick). Connection errors → 15s wait + reset delay; logic errors → exp backoff.
+// Handles RESOLVE_TWEET, FETCH_ENGAGEMENT (10m/1h/6h/24h/48h/72h), EVOLVE_PERSONA, and 6h reweight.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { extractFingerprintHex } from './fingerprint.js';

@@ -1,45 +1,8 @@
-/*
- * Single-connection Prisma client.
- *
- * WHY THIS SHAPE:
- *   This project serves ~3 generations/day with no real concurrency. A real
- *   connection pool (size >1) was the source of weeks of P1001 / P2024 storms
- *   on Supabase Supavisor (port 6543): zombie sockets, middleware $disconnect
- *   nuking in-flight queries, keepalive competing with real traffic.
- *
- *   With DATABASE_URL connection_limit=1 + pool_timeout=60, Prisma serializes
- *   all queries onto one socket. Supavisor may drop the socket after ~5 min
- *   idle; the next real query auto-reconnects in ~1s (Prisma engine handles
- *   it). No keepalive, no health-check pings — nothing to compete with real
- *   work for the single slot.
- *
- *   Middleware retries ONCE on transient connect errors. It does NOT call
- *   $disconnect()/$connect() — on a 1-slot pool that tears down the only
- *   connection and any concurrent caller times out with P2024. The Prisma
- *   engine reconnects on the next next(params) call on its own.
- *
- *   P2024 is intentionally NOT in the retry set: on a 1-slot pool it means
- *   "caller queued and legitimately waited too long," which retry won't fix.
- */
+// Single-connection Prisma client (connection_limit=1). Middleware retries once on transient
+// connect errors without $disconnect — engine reconnects on next() call.
 import 'dotenv/config';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { logger } from './logger.js';
-
-/*
- * REQUIRED DATABASE_URL PARAMS (set in .env):
- *
- *   connection_limit=1           One socket. Serializes queries; eliminates
- *                                pool-state bugs for this workload.
- *   pool_timeout=60              Max queue wait per query. 60s is safely
- *                                above Promise.all(9) fan-out worst case.
- *   connect_timeout=15           Boot-time Supavisor cold-start guard.
- *   tcp_keepalives_idle=60       OS-level TCP keepalive every 60s.
- *   tcp_keepalives_interval=10   Probe retry every 10s.
- *   tcp_keepalives_count=5       5 failed probes = dead socket.
- *
- *   DIRECT_URL on port 5432 username MUST be `postgres.PROJECT_REF`
- *   (Supavisor format), not bare `postgres`.
- */
 
 export const prisma = new PrismaClient({
   log: [

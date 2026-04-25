@@ -2,9 +2,28 @@ import { prisma } from './db.js';
 import { logger } from './logger.js';
 import { llm } from './agent.js';
 import { canCallLLM, recordLLMCall } from './rateGuard.js';
+import { OWNER_PROFILE } from './config/ownerProfile.js';
+
+// Simple word-overlap score between two persona profile texts. Used to flag
+// when persona evolution produces a near-identical profile (high-tier tweets
+// are too homogeneous).
+function profileOverlapRatio(a: string, b: string): number {
+  const tokenize = (s: string) => new Set(
+    s.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length > 3),
+  );
+  const ta = tokenize(a);
+  const tb = tokenize(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  const union = ta.size + tb.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
 
 export async function evolvePersona(): Promise<void> {
-  // Rate guard: check last evolution was 22+ hours ago
   const latestProfile = await prisma.personaProfile.findFirst({
     orderBy: { created_at: 'desc' },
   });
@@ -21,7 +40,6 @@ export async function evolvePersona(): Promise<void> {
     }
   }
 
-  // Fetch top 10 high-tier tweets from last 30 days
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60_000);
   const highTierOutcomes = await prisma.tweetOutcome.findMany({
     where: {
@@ -70,9 +88,10 @@ Also audit narrative arcs: if 3+ posts share the same arc (e.g. "struggle -> rea
 TASK: Produce an updated persona profile document for a builder on X.
 Extract: (1) sentence structures that recur in top posts, (2) vocabulary patterns, (3) topic angles that performed well, (4) what to avoid based on low performers.
 
-CRITICAL VOICE CONSTRAINT: The persona profile MUST sound like a GenZ Indian dev who tweets casually.
+CRITICAL VOICE CONSTRAINT: ${OWNER_PROFILE.voiceSeed}
+Stay true to this voice. Do not drift toward formal or literary language.
 If you notice the top posts using formal/literary language, DO NOT copy that pattern — flag it under AVOID instead.
-The SIGNATURE_PHRASES section must only contain phrases a real 23-year-old would say, not a novelist.
+The SIGNATURE_PHRASES section must only contain phrases a real person in this persona would say, not a novelist.
 Never include words like "indeed", "thus", "upon", "whilst", "amidst", "behold", "henceforth" in the profile.
 No metaphors about journeys, battles, or nature. No philosophical framing.
 
@@ -86,7 +105,6 @@ STRONG_TOPICS:
 AVOID:
 SIGNATURE_PHRASES:`;
 
-  // LLM rate guard check
   const { allowed, reason } = await canCallLLM();
   if (!allowed) {
     logger.warn({ reason }, 'LLM rate limit reached, skipping persona evolution');
@@ -99,13 +117,21 @@ SIGNATURE_PHRASES:`;
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(120_000) });
     const profileText = (res.content as string).trim();
 
-    // Deactivate all existing profiles
+    if (currentProfile?.profile_text) {
+      const overlap = profileOverlapRatio(profileText, currentProfile.profile_text);
+      if (overlap > 0.85) {
+        logger.warn(
+          { overlap: overlap.toFixed(2), previousVersion: currentProfile.version },
+          'Persona evolution produced near-identical profile — high-tier tweets may be too homogeneous. Post more diverse content to diversify evolution inputs.',
+        );
+      }
+    }
+
     await prisma.personaProfile.updateMany({
       where: { is_active: true },
       data: { is_active: false },
     });
 
-    // Create new active profile
     const newProfile = await prisma.personaProfile.create({
       data: {
         profile_text: profileText,
