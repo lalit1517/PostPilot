@@ -710,7 +710,7 @@ function afterContentGenerator(state: typeof AgentState.State): "diversityGate" 
 const MAX_REROLLS = 1;
 function afterDiversityGate(state: typeof AgentState.State): "personaAdapter" | "qualityScorer" {
   const rerolls = state.rerollCount ?? 0;
-  if (rerolls === 1 && rerolls <= MAX_REROLLS) {
+  if (state.rejectedFingerprint && rerolls > 0 && rerolls <= MAX_REROLLS) {
     // Route back through personaAdapter so the NEW format archetype gets baked
     // into personaParameters before contentGenerator re-runs.
     return "personaAdapter";

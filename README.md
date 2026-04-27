@@ -76,7 +76,7 @@ n8n (scheduler)           Telegram (notifications)
 
 2. **Intelligence** — LangGraph StateGraph with 7 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
 
-3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution).
+3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution) using due-task scheduling instead of fixed idle polling.
 
 
 ## 🔄 Self-Learning Pipeline
@@ -114,14 +114,14 @@ Generation (3 LLM calls max)
 | Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD. On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 38 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
 
 
 ## 🧠 AI Agent (LangGraph)
 
 **Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner if score < 8 OR coherence failed] -> END`
 
-**Re-roll edge:** `diversityGate -> personaAdapter` (capped at 1 re-roll). On rejection, a **different format archetype** is selected via `getNextFormatWithMeta()` and the rejected fingerprint + draft are persisted to state. `contentGenerator` then injects a `[STRUCTURAL RE-ROLL]` block naming the exact fingerprint and draft the model must NOT reproduce. The reroll routes through `personaAdapter` so the new format + prohibitions bake into the prompt before the retry.
+**Re-roll edge:** `diversityGate -> personaAdapter` (capped at 1 re-roll). On rejection, a **different format archetype** is selected via `getNextFormatWithMeta()` and the rejected fingerprint + draft are persisted to state. `contentGenerator` then injects a `[STRUCTURAL RE-ROLL]` block naming the exact fingerprint and draft the model must NOT reproduce. The reroll routes through `personaAdapter` so the new format + prohibitions bake into the prompt before the retry. `afterDiversityGate` only routes back while `rejectedFingerprint` is still set; accepted drafts clear that marker and advance to `qualityScorer`, preventing repeated generate calls from tripping the 5 RPM guard.
 
 **Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, coherenceGate, autoRefiner, and the n8n webhook. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
 
@@ -130,7 +130,7 @@ Generation (3 LLM calls max)
 | `contextLoader` | No | Sequential DB fetch: **slot-aware exemplars** (top 5 tweets from `TweetOutcome` filtered by `time_of_day = currentSlot` ordered by `outcome_score`, with global fallback to top-5 by raw likes when slot has <3 samples — logs `exemplarSource: 'slot_filtered' \| 'global_fallback'` + `slotSampleCount` so the agent learns morning-style for morning posts and night-style for night posts), weighted feedback (fallback to unweighted if < 3), active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()` (merges DB bottom-20% with in-memory cooldown — logs `blacklistSource: 'db+memory' \| 'memory_only'`), last 15 FORMAT-prefixed structural fingerprints. Trends24 pulled in parallel (non-DB) and filtered via `filterRelevantTrends()` — regex hard-exclusion + domain keyword scoring. When zero trends survive, sets `topicFree: true` on state. Extracts `OVERUSED_STRUCTURE/ARC/PHRASE` entries from the learned persona's AVOID section into `hardProhibitions`. Selects the next `FormatArchetype` via `getNextFormatWithMeta()` and logs `{ selectedFormat, recentFormatsConsidered, unusedFormatsCount }` — rotation is verifiable from logs. |
 | `personaAdapter` | No | Builds the prompt top-down: (1) `---HARD PROHIBITIONS---` block (overused structures/arcs/phrases from persona AVOID — stated as structural violations that cause rejection), (2) `---FORMAT DIRECTIVE (MANDATORY)---` block with the archetype's `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, and `exampleFirstSentence`, ending in "Violation makes the draft invalid, the quality scorer will reject it", (3) `OWNER_IDENTITY` from `src/config/ownerProfile.ts`, (4) learned persona, few-shot exemplars, trending hint, topic-free banner (when applicable), length target, topic blacklist, tone-by-time-of-day, feedback guidelines, recency/casing rules, and the `VOICE ANTI-PATTERNS` guardrail. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`. Rate-guarded via `canCallLLM()` (returns `nextAvailableAt` timestamp on block). Cold-start fallback: when no topic + `topicFree`, picks from `OWNER_PROFILE.coldStartTopics`. Structural re-roll: when `state.rejectedFingerprint` is set, injects a block naming the exact fingerprint + draft the model must NOT reproduce. Output passed through `finalizeDraft()`. Calls `registerDraftFormat(tweetId, formatName)` so future fingerprint reads attach the FORMAT: prefix. On rate-limit, sets `rateLimited: true` and the graph short-circuits to `END`. |
-| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. |
+| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state; this cleared marker is what lets `afterDiversityGate` proceed to scoring after a successful re-roll. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. |
 | `qualityScorer` | Yes | Prompt now opens with a `---STRUCTURAL CONTEXT FOR SCORING---` block naming the draft's fingerprint, its count in recent history, and explicit penalty rules (-1 at 2+ matches, -2 at 4+). Scores **1.0-10.0 with one decimal of precision** (e.g. 7.4, 8.2, 9.7) via `parseScore()` — model is instructed to differentiate similar drafts via the decimal and parser defensively rounds to 1 dp. Voice-authenticity criteria enforced. Runs `parseCritiqueHints()` → fixed hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`, plus `topic_drift` added by coherenceGate). Persists `quality_score` to TweetVersion. |
 | `coherenceGate` | No | Pure-string check via `checkTopicCoherence()`. Passes when topic is empty, or draft shares a topic keyword, or draft has ≥2 domain keywords (on-domain pivot). On mismatch: increments per-topic failure counter, degrades a high score to 6 to force a refiner pass, appends `topic_drift` to hints. At 3 strikes, auto-blacklists the topic via `recordTopicUsed`. |
 | `autoRefiner` | Conditional | Runs when score < 8 OR coherence failed. Reuses `state.personaParameters` (carries HARD PROHIBITIONS + FORMAT DIRECTIVE at top) and tells the model it MUST still obey those constraints on rewrite. Maps hints → `HINT_DIRECTIVES` (e.g. `topic_drift` → "TOPIC GROUNDING — draft must explicitly reference topic X, if irrelevant, acknowledge and pivot"). Output gated by `isSuspiciousDraft()`; rejection keeps original. |
@@ -173,7 +173,7 @@ Generation (3 LLM calls max)
 
 ## 👷 Background Workers
 
-The `RetryQueue` table manages three async task types processed every 10 seconds.
+The `RetryQueue` table manages three async task types. The worker schedules itself around the earliest pending `process_after` instead of polling the database on a fixed idle loop; if no task exists, it performs a 15-minute reconciliation check. New tasks created through `enqueueRetry()` wake the in-process scheduler immediately.
 
 ### 🔘 Telegram Buttons — What Each Does
 
@@ -289,7 +289,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 
 
-`reweightFeedback()` runs independently every 6 hours via in-memory timestamp gate in the worker loop.
+`reweightFeedback()` runs at 72h completion and via a 6-hour in-memory timestamp gate in the worker. The gate starts at process boot so feedback reweighting does not compete with startup queue discovery.
 
 ## 🔌 API Reference
 
@@ -326,7 +326,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics (`peak_likes`, `peak_retweets`, `peak_replies`), `quality_score` copy, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
 | `PersonaProfile` | Versioned persona documents with auto-increment version and `is_active` flag |
 | `LlmCallLog` | Rate limiting ledger with `called_at` index, pruned to 48h window |
-| `RetryQueue` | Task queue — RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA |
+| `RetryQueue` | Task queue — RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA. Indexed on `(status, process_after, created_at)` for due-task lookup. |
 
 
 
@@ -405,7 +405,7 @@ DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supa
                                        # Supabase transaction pooler (port 6543) for Prisma runtime.
                                        # Stability params (ALL required, see src/db.ts comment block):
                                        #   connection_limit=1            — single serialized socket; eliminates pool-state bugs for this workload (3 tweets/day, no concurrency)
-                                       #   pool_timeout=60                — wait up to 60s for the single slot (covers contextLoader's Promise.all(9) queueing end-to-end)
+                                       #   pool_timeout=60                — wait up to 60s for the single slot during a slow serialized query sequence
                                        #   connect_timeout=30             — Supabase-recommended; absorbs cross-region Supavisor handshake jitter without false P1001
                                        #   tcp_keepalives_idle=60         — OS-level TCP keepalive every 60s
                                        #   tcp_keepalives_interval=10     — probe retry every 10s if idle
@@ -514,7 +514,7 @@ If you are using the provided `workflows.json`, you must perform these manual st
 > Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
 >
 > **Why?**
-> With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9–11 calls. One additional call is reserved daily for **Persona Evolution**. The remaining ~40% of your daily budget (**20 calls per day**) serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**, ensuring you never get locked out during a critical edit.
+> With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9-12 calls. One additional call is reserved daily for **Persona Evolution**. The remaining daily quota serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**. Size this buffer from your actual provider quota and keep `src/rateGuard.ts` aligned with it.
 
 *   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` — see [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits) below.
 
@@ -522,12 +522,12 @@ If you are using the provided `workflows.json`, you must perform these manual st
 
 ### Increasing RPM / RPD Limits
 
-Defaults match the Gemini free tier (5 RPM / 19 RPD with 1-call buffer). Bump the two constants at the top of [`src/rateGuard.ts`](src/rateGuard.ts) to match your tier:
+Defaults are set in [`src/rateGuard.ts`](src/rateGuard.ts) and must match your active Google AI tier/model quota. Current app-side settings are 5 RPM / 38 RPD:
 
 ```typescript
-// src/rateGuard.ts:15-16
+// src/rateGuard.ts
 const RPM_LIMIT = 5;      // bump to your tier's RPM
-const RPD_LIMIT = 19;     // bump to your tier's RPD (leave 1-call buffer)
+const RPD_LIMIT = 38;     // bump to your tier's RPD
 ```
 
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (skips diversity/scorer/refiner/webhook), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
@@ -568,14 +568,15 @@ When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (
 
 ## 🛡️ Database Stability
 
-PostPilot runs in **single-connection mode** (`connection_limit=1`) with **explicit sequential query loading** in `contextLoader`. The workload is ~3 generations/day with zero concurrent requests — a real pool would add state-drift bugs without any throughput benefit.
+PostPilot runs in **single-connection mode** (`connection_limit=1`) with **explicit sequential query loading** in `contextLoader` and due-task worker scheduling. The workload is ~3 generations/day with minimal real concurrency; keeping the worker quiet while idle avoids pool-state churn without sacrificing throughput.
 
 **How it works** (see [`src/db.ts`](src/db.ts), [`src/agent.ts`](src/agent.ts) `contextLoader`):
 
 1. **Connection-string params** — `connection_limit=1`, `pool_timeout=60`, `connect_timeout=30`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
 2. **Retry-once middleware** — on `P1001 / P1002 / P1008 / P1017` or `"Can't reach database" / "Server has closed" / ECONNREFUSED / ETIMEDOUT`, waits 1.5s and retries the query once. The Prisma engine reconnects transparently on the retry call — no manual `$disconnect()` (which would nuke the only connection and block every other caller).
 3. **`ensureDbReady()`** — probes with one retry before `contextLoader`'s query sequence, so a cold socket reconnects on one probe rather than on the first real query.
-4. **Sequential loading in `contextLoader`** — the 8 DB-touching reads run as explicit `await`s instead of `Promise.all`. On a 1-slot pool `Promise.all` is a lie (queries serialize anyway), and when one query stalls, a fake-parallel fan-out blocks every subsequent request (e.g. `/api/generate`'s `tweet.create()`) with `P2024`. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
+4. **Sequential loading in `contextLoader`** — the DB-touching reads run as explicit `await`s instead of `Promise.all`. On a 1-slot pool `Promise.all` is a lie (queries serialize anyway), and when one query stalls, a fake-parallel fan-out blocks every subsequent request with `P2024`. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
+5. **Due-task worker scheduling** — `src/worker.ts` sleeps until the earliest pending `RetryQueue.process_after`, with a 15-minute idle reconciliation cap. `enqueueRetry()` wakes the scheduler immediately for newly queued work. The hot lookup is backed by `@@index([status, process_after, created_at])`.
 
 `canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
 
@@ -587,7 +588,9 @@ PostPilot runs in **single-connection mode** (`connection_limit=1`) with **expli
 
 Supavisor on free tier drops idle sockets after ~5 min. The middleware in `src/db.ts` reconnects transparently on the next real query, logging a single `WARN`. A prior `/health/db` keepalive endpoint was removed: during cross-region network flaps it competed with real work for the single pool slot (45s hangs), made UptimeRobot report the service DOWN during recoverable blips, and added more noise than it saved.
 
-Worker loop ticks every **60s** (not 10s). Most ticks do nothing (no pending tasks), so 6× fewer ticks = 6× fewer chances to hit a dead socket. `RESOLVE_TWEET` already has a 10-min initial delay baked in, so 60s tick latency is invisible.
+The worker no longer polls every 60s while idle. It sleeps until the next due `RetryQueue` task, or at most 15 minutes when the queue is empty. Single connection failures stay quiet; WARN logs start after 3 consecutive worker DB failures and CRITICAL logs remain reserved for 5 consecutive failures.
+
+Migration `20260427000000_add_retry_queue_due_index` has been applied to Supabase. Verification surface: `prisma migrate status` should report `Database schema is up to date!`, and Postgres should have `RetryQueue_status_process_after_created_at_idx`.
 
 ### Troubleshooting: `P1001` on port **5432** during deploy
 
@@ -731,10 +734,10 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
-- **Google AI Studio free tier:** 5 RPM, 20 RPD (rate-guarded at 5 / 19 in `src/rateGuard.ts` with a 1-call buffer). When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
+- **Google AI Studio limits:** current app-side guard is 5 RPM / 38 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
 
 - **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 
-- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → coherenceGate → [autoRefiner if score<8 OR coherence failed] → END`. Re-roll edge: `diversityGate → personaAdapter → contentGenerator` (capped at 1; new format archetype + rejected fingerprint injected into the retry prompt).
+- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → coherenceGate → [autoRefiner if score<8 OR coherence failed] → END`. Re-roll edge: `diversityGate → personaAdapter → contentGenerator` (capped at 1; new format archetype + rejected fingerprint injected into the retry prompt). The route back is keyed to active `rejectedFingerprint` state, not `rerollCount` alone, so a passed re-roll cannot loop and burn the 5 RPM budget.
 
 
