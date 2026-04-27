@@ -401,11 +401,11 @@ npm install
 Create `.env` in the project root (use `.env.example` as a template):
 
 ```env
-DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1&pool_timeout=60&connect_timeout=30&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
+DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=5&pool_timeout=60&connect_timeout=30&tcp_keepalives_idle=60&tcp_keepalives_interval=10&tcp_keepalives_count=5
                                        # Supabase transaction pooler (port 6543) for Prisma runtime.
                                        # Stability params (ALL required, see src/db.ts comment block):
-                                       #   connection_limit=1            — single serialized socket; eliminates pool-state bugs for this workload (3 tweets/day, no concurrency)
-                                       #   pool_timeout=60                — wait up to 60s for the single slot during a slow serialized query sequence
+                                       #   connection_limit=5            — small pool for API ingress, worker tasks, callbacks, and background reads
+                                       #   pool_timeout=60                — wait up to 60s for a slot during a slow DB/network window
                                        #   connect_timeout=30             — Supabase-recommended; absorbs cross-region Supavisor handshake jitter without false P1001
                                        #   tcp_keepalives_idle=60         — OS-level TCP keepalive every 60s
                                        #   tcp_keepalives_interval=10     — probe retry every 10s if idle
@@ -568,14 +568,14 @@ When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (
 
 ## 🛡️ Database Stability
 
-PostPilot runs in **single-connection mode** (`connection_limit=1`) with **explicit sequential query loading** in `contextLoader` and due-task worker scheduling. The workload is ~3 generations/day with minimal real concurrency; keeping the worker quiet while idle avoids pool-state churn without sacrificing throughput.
+PostPilot runs in **small-pool mode** (`connection_limit=5`) with **explicit sequential query loading** in `contextLoader` and due-task worker scheduling. The workload is ~3 generations/day, but real overlap still happens when `/api/generate`, worker resolution, Telegram callbacks, status/admin checks, and background agent reads land in the same minute.
 
 **How it works** (see [`src/db.ts`](src/db.ts), [`src/agent.ts`](src/agent.ts) `contextLoader`):
 
-1. **Connection-string params** — `connection_limit=1`, `pool_timeout=60`, `connect_timeout=30`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
+1. **Connection-string params** — `connection_limit=5`, `pool_timeout=60`, `connect_timeout=30`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
 2. **Retry-once middleware** — on `P1001 / P1002 / P1008 / P1017` or `"Can't reach database" / "Server has closed" / ECONNREFUSED / ETIMEDOUT`, waits 1.5s and retries the query once. The Prisma engine reconnects transparently on the retry call — no manual `$disconnect()` (which would nuke the only connection and block every other caller).
 3. **`ensureDbReady()`** — probes with one retry before `contextLoader`'s query sequence, so a cold socket reconnects on one probe rather than on the first real query.
-4. **Sequential loading in `contextLoader`** — the DB-touching reads run as explicit `await`s instead of `Promise.all`. On a 1-slot pool `Promise.all` is a lie (queries serialize anyway), and when one query stalls, a fake-parallel fan-out blocks every subsequent request with `P2024`. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
+4. **Sequential loading in `contextLoader`** — the DB-touching reads run as explicit `await`s instead of `Promise.all`. Even with a small pool, unbounded fake parallelism can occupy every slot during a slow DB/network window. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
 5. **Due-task worker scheduling** — `src/worker.ts` sleeps until the earliest pending `RetryQueue.process_after`, with a 15-minute idle reconciliation cap. `enqueueRetry()` wakes the scheduler immediately for newly queued work. The hot lookup is backed by `@@index([status, process_after, created_at])`.
 
 `canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
@@ -591,6 +591,8 @@ Supavisor on free tier drops idle sockets after ~5 min. The middleware in `src/d
 The worker no longer polls every 60s while idle. It sleeps until the next due `RetryQueue` task, or at most 15 minutes when the queue is empty. Single connection failures stay quiet; WARN logs start after 3 consecutive worker DB failures and CRITICAL logs remain reserved for 5 consecutive failures.
 
 Migration `20260427000000_add_retry_queue_due_index` has been applied to Supabase. Verification surface: `prisma migrate status` should report `Database schema is up to date!`, and Postgres should have `RetryQueue_status_process_after_created_at_idx`.
+
+> If Render still has `connection_limit=1` or `connection_limit=3`, update only that query parameter to `connection_limit=5` and redeploy. Keep `pool_timeout=60`, `connect_timeout=30`, `pgbouncer=true`, and the TCP keepalive params unchanged.
 
 ### Troubleshooting: `P1001` on port **5432** during deploy
 
@@ -671,7 +673,7 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 3. **Start Command**: `npm start` (runs migrations, then starts the server + in-process worker).
 4. **Dashboard Release Command**: run `npm run release:grafana` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=1` + `pool_timeout=60` and all five `tcp_keepalives_*` / `connect_timeout` params are required. See [Database Stability](#database-stability) for why single-connection mode.
+   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=5` + `pool_timeout=60` and all five `tcp_keepalives_*` / `connect_timeout` params are required. See [Database Stability](#database-stability) for why small-pool mode.
 
    - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param. Username must be `postgres.PROJECT_REF`.
 

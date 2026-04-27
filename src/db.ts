@@ -1,5 +1,5 @@
-// Single-connection Prisma client (connection_limit=1). Middleware retries once on transient
-// connect errors without $disconnect — engine reconnects on next() call.
+// Small-pool Prisma client (recommended connection_limit=5). Middleware retries
+// once on transient connect errors without $disconnect — engine reconnects on next() call.
 import 'dotenv/config';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { logger } from './logger.js';
@@ -11,9 +11,34 @@ export const prisma = new PrismaClient({
   ],
 });
 
+function getConfiguredConnectionLimit(): number | null {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) return null;
+
+  try {
+    const parsed = new URL(databaseUrl);
+    const raw = parsed.searchParams.get('connection_limit');
+    if (!raw) return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+const RECOMMENDED_CONNECTION_LIMIT = 5;
+
+const configuredConnectionLimit = getConfiguredConnectionLimit();
+if (configuredConnectionLimit !== null && configuredConnectionLimit < RECOMMENDED_CONNECTION_LIMIT) {
+  logger.warn(
+    { connectionLimit: configuredConnectionLimit, recommendedConnectionLimit: RECOMMENDED_CONNECTION_LIMIT },
+    'DATABASE_URL connection_limit is below the recommended PostPilot runtime setting'
+  );
+}
+
 prisma.$on('error', (e: Prisma.LogEvent) => {
-  // Keep this as a diagnostic signal if it ever shows up — but with
-  // connection_limit=1 + pool_timeout=60 it should be extremely rare.
+  // Keep this as a diagnostic signal if it ever shows up, but with
+  // connection_limit=5 + pool_timeout=60 it should be rare.
   if (e.message?.includes('connection pool')) {
     logger.warn({ msg: e.message }, 'Prisma connection-pool event');
   }
@@ -60,17 +85,16 @@ prisma.$use(async (params, next) => {
       'DB transient error; retrying query once'
     );
     await sleep(RETRY_DELAY_MS);
-    // No $disconnect/$connect — on a 1-slot pool that nukes the only
-    // connection. The engine reconnects transparently on this next() call.
+    // No $disconnect/$connect — it tears down the whole Prisma pool and can
+    // block concurrent API/worker callers. The engine reconnects transparently.
     return await next(params);
   }
 });
 
 /**
- * Warm-up probe callers can run before a burst of parallel queries (like
- * contextLoader's Promise.all). Runs a single SELECT 1; if it fails, one
- * retry — same pattern as the middleware. Ensures the cold socket is live
- * before fan-out so the first real query doesn't eat the reconnect penalty.
+ * Warm-up probe callers can run before a sequence of DB reads. Runs a single
+ * SELECT 1; if it fails, one retry — same pattern as the middleware. Ensures
+ * a cold socket reconnects before the first real query eats the penalty.
  */
 export async function ensureDbReady(): Promise<boolean> {
   try {
