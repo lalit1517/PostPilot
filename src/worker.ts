@@ -229,8 +229,11 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
     { name: 'Twitter Native', url: `https://twitter.com/${username}`, key: 'twitter.com', kind: 'twitter' }
   ];
   const failures: Array<{ source: string; status?: number; err?: string; len?: number }> = [];
+  const checkedSources: string[] = [];
+  const noMatchSources: string[] = [];
 
   for (const source of sources) {
+    checkedSources.push(source.name);
     try {
       const headers = source.kind === 'nitter'
         ? {
@@ -264,8 +267,16 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
         continue;
       }
 
+      if (looksLikeChallengePage(text)) {
+        failures.push({ source: source.name, err: "bot challenge page" });
+        if (source.kind === 'nitter') coolDownSource(source.key);
+        logger.debug({ source: source.name }, "Scraping source returned bot challenge page");
+        continue;
+      }
+
       const result = checkHtmlForFingerprint(text, fp, username);
       if (result) return result;
+      noMatchSources.push(source.name);
     } catch (err: any) {
       const message = err instanceof Error ? err.message : String(err);
       failures.push({ source: source.name, err: message });
@@ -274,29 +285,67 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
     }
   }
 
-  logger.warn({ username, sourceCount: sources.length, failures }, "Tweet fingerprint not found in scraping sources");
+  logger.warn({ username, sourceCount: sources.length, checkedSources, noMatchSources, failures }, "Tweet fingerprint not found in scraping sources");
   return null;
+}
+
+function looksLikeChallengePage(content: string): boolean {
+  const lower = content.slice(0, 5000).toLowerCase();
+  return lower.includes('anubis') ||
+    lower.includes('checking your browser') ||
+    lower.includes('just a moment') ||
+    lower.includes('enable javascript') ||
+    lower.includes('requires javascript');
+}
+
+function normalizeScrapedContent(content: string): string {
+  return content
+    .replace(/&#8203;|&#x200b;/gi, '\u200B')
+    .replace(/&#8204;|&#x200c;/gi, '\u200C')
+    .replace(/\\u200b/gi, '\u200B')
+    .replace(/\\u200c/gi, '\u200C');
+}
+
+function hexToInvisibleSuffix(fingerprint: string): string {
+  const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
+  let invisibleSuffix = '';
+  for (let i = 0; i < fingerprint.length; i++) {
+    const hexDigit = fingerprint.charAt(i);
+    const binary = parseInt(hexDigit, 16).toString(2).padStart(4, '0');
+    for (let j = 0; j < binary.length; j++) {
+      invisibleSuffix += INVISIBLE_MAP[binary.charAt(j)];
+    }
+  }
+  return invisibleSuffix;
+}
+
+function containsFingerprintRun(content: string, fingerprint: string): boolean {
+  const invisibleRunRegex = /[\u200B\u200C]{32,}/g;
+  const target = fingerprint.toLowerCase();
+  for (const match of content.matchAll(invisibleRunRegex)) {
+    const run = match[0];
+    for (let offset = 0; offset <= run.length - 32; offset++) {
+      const hex = extractFingerprintHex(run.slice(offset, offset + 32));
+      if (hex?.toLowerCase() === target) return true;
+    }
+  }
+  return false;
 }
 
 function checkHtmlForFingerprint(content: string, fingerprint: string, username: string) {
     // A primitive check:
     // Since fingerprint zeroes/ones map to \u200B and \u200C, let's rebuild the invisible string to search exactly.
-    const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
-    let invisibleSuffix = '';
-    for (let i = 0; i < fingerprint.length; i++) {
-      const hexDigit = fingerprint.charAt(i);
-      const binary = parseInt(hexDigit, 16).toString(2).padStart(4, '0');
-      for (let j = 0; j < binary.length; j++) {
-        invisibleSuffix += INVISIBLE_MAP[binary.charAt(j)];
-      }
-    }
+    const normalizedContent = normalizeScrapedContent(content);
+    const invisibleSuffix = hexToInvisibleSuffix(fingerprint);
 
-    if (content.indexOf(invisibleSuffix) !== -1) {
+    if (normalizedContent.indexOf(invisibleSuffix) !== -1 || containsFingerprintRun(normalizedContent, fingerprint)) {
         // Match found! We need the tweet ID.
         // We can do a rudimentary regex around the invisible match to find status ID.
         // E.g. searching for `status/1234567890` nearby.
-        const matchIndex = content.indexOf(invisibleSuffix);
-        const snippet = content.substring(Math.max(0, matchIndex - 1000), matchIndex + 1000);
+        const matchIndex = normalizedContent.indexOf(invisibleSuffix);
+        const snippetStart = matchIndex === -1 ? 0 : Math.max(0, matchIndex - 1000);
+        const snippetEnd = matchIndex === -1 ? normalizedContent.length : matchIndex + 1000;
+        const snippet = normalizedContent.substring(snippetStart, snippetEnd);
         
         // Find /status/12345...
         const statusRegex = new RegExp(`/${username}/status/(\\d+)`, 'i');
