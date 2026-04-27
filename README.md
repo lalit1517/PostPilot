@@ -226,13 +226,13 @@ Detects posted tweets via invisible fingerprint matching.
 
 1. Triggered 10 minutes after user confirms posting (via Telegram button or intent link redirect).
 
-2. Polls 4 Nitter instances (`nitter.net`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`) and falls back to the native Twitter timeline with browser-like headers.
+2. Polls a shuffled Nitter source list (override with `NITTER_INSTANCES`; built-in default includes `nitter.net`, `xcancel.com`, `nitter.privacyredirect.com`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`, `nitter.tiekoetter.com`, `lightbrd.com`) and falls back to the native Twitter timeline with browser-like headers. Hosts that return `403`, `429`, `5xx`, or fetch failures are cooled down for 30 minutes.
 
 3. Matches the 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 
 4. On match: marks tweet as `POSTED_CONFIRMED`, schedules first engagement fetch.
 
-5. On miss: one delayed retry at ~45 minutes, then sets status to `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null` — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+5. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null` — prevents the tweet from silently appearing as posted when it wasn't confirmed.
 
 **Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit any visible part of the tweet in X's compose box, including adding, changing, or removing text and punctuation. The fingerprint is only destroyed if you delete characters past the last visible character (i.e. backspace through the trailing space into the invisible suffix), or select-all and retype. When in doubt: edit the middle, leave the end alone.
 
@@ -416,6 +416,7 @@ DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supaba
 GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/app/apikey
                                        # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
+NITTER_INSTANCES=nitter.net,xcancel.com,nitter.privacyredirect.com,nitter.privacydev.net,nitter.poast.org,nitter.space,nitter.tiekoetter.com,lightbrd.com
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
 TELEGRAM_BOT_TOKEN=...                 # From @BotFather

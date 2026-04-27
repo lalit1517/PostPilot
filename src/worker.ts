@@ -37,8 +37,71 @@ let consecutiveDbFailures = 0;
 // In-memory queue to prevent overlapping polls
 const activePolls = new Set<string>();
 
+const DEFAULT_NITTER_INSTANCES = [
+  'nitter.net',
+  'xcancel.com',
+  'nitter.privacyredirect.com',
+  'nitter.privacydev.net',
+  'nitter.poast.org',
+  'nitter.space',
+  'nitter.tiekoetter.com',
+  'lightbrd.com',
+] as const;
+
+const SCRAPER_COOLDOWN_MS = 30 * 60 * 1000;
+const scraperCooldownUntil = new Map<string, number>();
+
 function getJitterDelay(baseDelayMs: number) {
   return baseDelayMs + Math.floor(Math.random() * 2000);
+}
+
+function normalizeNitterHost(rawHost: string): string | null {
+  const trimmed = rawHost.trim();
+  if (!trimmed) return null;
+
+  try {
+    const parsed = trimmed.includes('://')
+      ? new URL(trimmed)
+      : new URL(`https://${trimmed}`);
+    return parsed.host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function getNitterInstances(): string[] {
+  const configured = process.env.NITTER_INSTANCES?.split(',')
+    .map(normalizeNitterHost)
+    .filter((host): host is string => Boolean(host));
+  const hosts = configured && configured.length > 0
+    ? configured
+    : [...DEFAULT_NITTER_INSTANCES];
+  return [...new Set(hosts)];
+}
+
+function shuffle<T>(items: readonly T[]): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const current = copy[i];
+    copy[i] = copy[j] as T;
+    copy[j] = current as T;
+  }
+  return copy;
+}
+
+function isSourceCoolingDown(sourceKey: string): boolean {
+  const until = scraperCooldownUntil.get(sourceKey);
+  if (!until) return false;
+  if (until <= Date.now()) {
+    scraperCooldownUntil.delete(sourceKey);
+    return false;
+  }
+  return true;
+}
+
+function coolDownSource(sourceKey: string): void {
+  scraperCooldownUntil.set(sourceKey, Date.now() + SCRAPER_COOLDOWN_MS);
 }
 
 async function revertTelegramButtonOnFailure(
@@ -89,23 +152,7 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 
     logger.info({ tweetId, username, attempt }, "Polling for posted tweet");
 
-    let found: { tweetId: string, url: string } | null = null;
-    let failedFetches = 0;
-
-    // Up to 5 requests in this execution
-    for (let tryNum = 1; tryNum <= 5; tryNum++) {
-      try {
-        found = await pollTimelineForFingerprint(username, tweet.fingerprint);
-        if (found) break;
-      } catch (err: any) {
-        failedFetches++;
-        logger.warn({ tweetId, tryNum, err: err.message }, "Single poll attempt failed");
-      }
-      
-      if (tryNum < 5 && !found) {
-        await new Promise(r => setTimeout(r, getJitterDelay(4000)));
-      }
-    }
+    const found = await pollTimelineForFingerprint(username, tweet.fingerprint);
 
     if (found) {
       await prisma.tweet.update({
@@ -125,8 +172,12 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
       await enqueueRetry("FETCH_ENGAGEMENT", { tweetId, username }, 1, firstFetchTime, 6);
 
     } else {
-      // Re-schedule ONE additional retry (delayed) before marking as error
-      if (attempt < 2) {
+      if (attempt === 1) {
+        const shortRetryDelay = getJitterDelay(7 * 60 * 1000);
+        const later = new Date(Date.now() + shortRetryDelay);
+        await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1, later);
+        logger.info({ tweetId, nextAttemptAt: later }, "Tweet not found yet. Scheduling short retry.");
+      } else if (attempt === 2) {
         const fallbackDelay = getJitterDelay(45 * 60 * 1000); // 45-47 mins
         const later = new Date(Date.now() + fallbackDelay);
         await enqueueRetry("RESOLVE_TWEET", { tweetId, username }, attempt + 1, later);
@@ -150,51 +201,80 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
   }
 }
 
-const NITTER_INSTANCES = [
-  'nitter.net',
-  'nitter.privacydev.net',
-  'nitter.poast.org',
-  'nitter.space'
-];
+type ScrapeSource = {
+  name: string;
+  url: string;
+  key: string;
+  kind: 'nitter' | 'twitter';
+};
 
 async function pollTimelineForFingerprint(username: string, fp: string): Promise<{ tweetId: string, url: string } | null> {
-  const headers = {
+  const baseHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/json',
     'Accept-Language': 'en-US,en;q=0.9',
     'Cache-Control': 'no-cache'
   };
 
-  const sources = [
-    ...NITTER_INSTANCES.map(host => ({ name: `Nitter RSS (${host})`, url: `https://${host}/${username}/rss` })),
-    { name: 'Twitter Native', url: `https://twitter.com/${username}` }
+  const nitterSources = shuffle(getNitterInstances())
+    .filter(host => !isSourceCoolingDown(host))
+    .map((host): ScrapeSource => ({
+      name: `Nitter RSS (${host})`,
+      url: `https://${host}/${username}/rss`,
+      key: host,
+      kind: 'nitter',
+    }));
+
+  const sources: ScrapeSource[] = [
+    ...nitterSources,
+    { name: 'Twitter Native', url: `https://twitter.com/${username}`, key: 'twitter.com', kind: 'twitter' }
   ];
+  const failures: Array<{ source: string; status?: number; err?: string; len?: number }> = [];
 
   for (const source of sources) {
     try {
+      const headers = source.kind === 'nitter'
+        ? {
+          ...baseHeaders,
+          'Accept': 'application/rss+xml, application/xml, text/xml, text/html;q=0.8',
+          'Referer': `https://${source.key}/${username}`,
+        }
+        : {
+          ...baseHeaders,
+          'Accept': 'text/html,application/json',
+        };
+
       const res = await fetch(source.url, {
         headers,
         signal: AbortSignal.timeout(8000)
       });
 
       if (!res.ok) {
-        logger.warn({ source: source.name, status: res.status }, "Scraping source returned error status");
+        failures.push({ source: source.name, status: res.status });
+        if (source.kind === 'nitter' && (res.status === 403 || res.status === 429 || res.status >= 500)) {
+          coolDownSource(source.key);
+        }
+        logger.debug({ source: source.name, status: res.status }, "Scraping source returned error status");
         continue;
       }
 
       const text = await res.text();
       if (!text || text.length < 200) {
-        logger.warn({ source: source.name, len: text?.length }, "Empty or suspicious response from source");
+        failures.push({ source: source.name, len: text?.length });
+        logger.debug({ source: source.name, len: text?.length }, "Empty or suspicious response from source");
         continue;
       }
 
       const result = checkHtmlForFingerprint(text, fp, username);
       if (result) return result;
     } catch (err: any) {
-      logger.warn({ source: source.name, err: err.message }, "Scraping source fetch failed");
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push({ source: source.name, err: message });
+      if (source.kind === 'nitter') coolDownSource(source.key);
+      logger.debug({ source: source.name, err: message }, "Scraping source fetch failed");
     }
   }
 
+  logger.warn({ username, sourceCount: sources.length, failures }, "Tweet fingerprint not found in scraping sources");
   return null;
 }
 
