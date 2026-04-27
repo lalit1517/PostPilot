@@ -141,7 +141,10 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
       }
     }
   } catch (error: any) {
-    logger.error({ tweetId, err: error.message }, "Error during tweet resolution");
+    const message = error instanceof Error ? error.message : String(error);
+    const logFn = isConnectionError(error) ? logger.warn.bind(logger) : logger.error.bind(logger);
+    logFn({ tweetId, err: message }, "Error during tweet resolution");
+    throw error;
   } finally {
     activePolls.delete(tweetId);
   }
@@ -336,8 +339,6 @@ async function processWorkerTick(): Promise<TickResult> {
       await new Promise(r => setTimeout(r, 200)); // Timeout for Stability
       const payload = task.payload as any;
 
-      await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PROCESSING' } });
-
       try {
         if (task.task_type === "RESOLVE_TWEET") {
           await resolveTweetAfterPost(payload.tweetId, payload.username, task.attempts);
@@ -349,8 +350,19 @@ async function processWorkerTick(): Promise<TickResult> {
         await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
-        logger.error({ id: task.id, taskType: task.task_type, err: message }, "Task processing failed");
-        if (task.attempts >= task.max_retries) {
+        const connectionError = isConnectionError(e);
+        const logFn = connectionError ? logger.warn.bind(logger) : logger.error.bind(logger);
+        logFn({ id: task.id, taskType: task.task_type, connectionError, err: message }, "Task processing failed");
+        if (connectionError) {
+          await prisma.retryQueue.update({
+            where: { id: task.id },
+            data: {
+              status: 'PENDING',
+              last_error: message,
+              process_after: new Date(Date.now() + CONNECTION_ERROR_BASE_WAIT_MS)
+            }
+          });
+        } else if (task.attempts >= task.max_retries) {
           await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: message } });
         } else {
           await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'PENDING', attempts: task.attempts + 1 } });
@@ -525,7 +537,9 @@ export async function fetchTweetEngagement(tweetId: string, attempt: number, use
         throw new Error(`Source returned status ${res.status}`);
       }
     } catch (error: any) {
-      logger.error({ tweetId, err: error.message, attempt }, "Engagement fetch failed.");
+      const message = error instanceof Error ? error.message : String(error);
+      const logFn = isConnectionError(error) ? logger.warn.bind(logger) : logger.error.bind(logger);
+      logFn({ tweetId, err: message, attempt }, "Engagement fetch failed.");
       throw error;
     }
 }
