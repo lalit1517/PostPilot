@@ -1,4 +1,5 @@
-// Background worker (60s tick). Connection errors → 15s wait + reset delay; logic errors → exp backoff.
+// Background worker. Schedules around the next due RetryQueue row instead of
+// polling every minute, so idle workers do not keep poking Supavisor.
 // Handles RESOLVE_TWEET, FETCH_ENGAGEMENT (10m/1h/6h/24h/48h/72h), EVOLVE_PERSONA, and 6h reweight.
 import { prisma } from './db.js';
 import { logger } from './logger.js';
@@ -26,6 +27,8 @@ function isConnectionError(err: unknown): boolean {
 interface TickResult {
   ok: boolean;
   connectionError: boolean;
+  nextDelayMs: number;
+  err?: string;
 }
 
 let consecutiveDbFailures = 0;
@@ -226,7 +229,7 @@ function checkHtmlForFingerprint(content: string, fingerprint: string, username:
 }
 
 export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date, maxRetries: number = 5) {
-  await prisma.retryQueue.create({
+  const task = await prisma.retryQueue.create({
     data: {
       task_type: taskType,
       payload: payload,
@@ -235,47 +238,101 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
       process_after: processAfter || new Date()
     }
   });
+
+  if (workerStarted) {
+    scheduleWorkerTick(getDelayUntil(task.process_after));
+  }
 }
 
-// Track last reweight time in-memory (6h gate)
-let lastReweightAt = 0;
+// Track last reweight time in-memory (6h gate). Start the clock at boot so
+// feedback reweighting never competes with startup or first queue discovery.
+let lastReweightAt = Date.now();
 let workerStarted = false;
 let workerTickRunning = false;
-let workerDelayMs = 60_000;
+let workerTimer: NodeJS.Timeout | null = null;
+let requestedWorkerDelayMs: number | null = null;
+let workerDelayMs = 15 * 60_000;
 
-// Tick every 60s. Most ticks do nothing (no pending tasks). Fewer ticks =
-// fewer chances for Supavisor to idle-kill the socket between ticks =
-// quieter logs. RESOLVE_TWEET already has a 10-min initial delay baked in,
-// so 60s tick latency is invisible for real workloads.
-const BASE_WORKER_DELAY_MS = 60_000;
-const MAX_WORKER_DELAY_MS = 5 * 60_000;
-const CONNECTION_ERROR_WAIT_MS = 15_000;
+const WORKER_TASK_BATCH_SIZE = 3;
+const MIN_WORKER_DELAY_MS = 1_000;
+const IDLE_RECHECK_MS = 15 * 60_000;
+const CONNECTION_ERROR_BASE_WAIT_MS = 2 * 60_000;
+const CONNECTION_ERROR_MAX_WAIT_MS = 15 * 60_000;
+const FEEDBACK_REWEIGHT_INTERVAL_MS = 6 * 60 * 60_000;
+
+function clampWorkerDelay(delayMs: number): number {
+  if (!Number.isFinite(delayMs)) return IDLE_RECHECK_MS;
+  return Math.max(MIN_WORKER_DELAY_MS, Math.min(delayMs, IDLE_RECHECK_MS));
+}
+
+function getDelayUntil(processAfter: Date): number {
+  return clampWorkerDelay(processAfter.getTime() - Date.now());
+}
+
+function scheduleWorkerTick(delayMs: number): void {
+  if (!workerStarted) return;
+
+  const nextDelayMs = clampWorkerDelay(delayMs);
+  if (workerTickRunning) {
+    requestedWorkerDelayMs = Math.min(requestedWorkerDelayMs ?? nextDelayMs, nextDelayMs);
+    return;
+  }
+
+  if (workerTimer) clearTimeout(workerTimer);
+  workerDelayMs = nextDelayMs;
+  workerTimer = setTimeout(() => {
+    workerTimer = null;
+    void scheduledWorkerTick();
+  }, nextDelayMs);
+}
+
+function consumeRequestedWorkerDelay(fallbackDelayMs: number): number {
+  const requested = requestedWorkerDelayMs;
+  requestedWorkerDelayMs = null;
+  return requested === null ? fallbackDelayMs : Math.min(fallbackDelayMs, requested);
+}
+
+async function getNextPendingTaskDelay(): Promise<number> {
+  const nextTask = await prisma.retryQueue.findFirst({
+    where: { status: 'PENDING' },
+    select: { process_after: true },
+    orderBy: [{ process_after: 'asc' }, { created_at: 'asc' }]
+  });
+
+  return nextTask ? getDelayUntil(nextTask.process_after) : IDLE_RECHECK_MS;
+}
 
 async function processWorkerTick(): Promise<TickResult> {
   try {
-    // 6-hour feedback reweight check
-    const sixHoursMs = 6 * 60 * 60_000;
-    if (Date.now() - lastReweightAt >= sixHoursMs) {
-      try {
-        await reweightFeedback();
-        lastReweightAt = Date.now();
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        logger.error({ err: message }, "Scheduled reweightFeedback failed");
-      }
-    }
-
-    const tasks = await prisma.retryQueue.findMany({
-      where: {
-        status: 'PENDING',
-        process_after: { lte: new Date() }
-      },
-      take: 3, //ORIGINAL - 10, KEEP 3 FOR STABILITY
-      orderBy: { created_at: 'asc' }
+    const pendingTasks = await prisma.retryQueue.findMany({
+      where: { status: 'PENDING' },
+      take: WORKER_TASK_BATCH_SIZE,
+      orderBy: [{ process_after: 'asc' }, { created_at: 'asc' }]
     });
 
-    for (const task of tasks) {
+    const now = Date.now();
+    const dueTasks = pendingTasks.filter((task) => task.process_after.getTime() <= now);
 
+    if (dueTasks.length === 0) {
+      if (now - lastReweightAt >= FEEDBACK_REWEIGHT_INTERVAL_MS) {
+        try {
+          await reweightFeedback();
+          lastReweightAt = Date.now();
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error({ err: message }, "Scheduled reweightFeedback failed");
+        }
+      }
+
+      const nextTask = pendingTasks[0];
+      return {
+        ok: true,
+        connectionError: false,
+        nextDelayMs: nextTask ? getDelayUntil(nextTask.process_after) : IDLE_RECHECK_MS
+      };
+    }
+
+    for (const task of dueTasks) {
       await new Promise(r => setTimeout(r, 200)); // Timeout for Stability
       const payload = task.payload as any;
 
@@ -292,7 +349,7 @@ async function processWorkerTick(): Promise<TickResult> {
         await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'COMPLETED' } });
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
-        logger.error({ id: task.id, err: message }, "Task processing failed");
+        logger.error({ id: task.id, taskType: task.task_type, err: message }, "Task processing failed");
         if (task.attempts >= task.max_retries) {
           await prisma.retryQueue.update({ where: { id: task.id }, data: { status: 'FAILED', last_error: message } });
         } else {
@@ -300,24 +357,27 @@ async function processWorkerTick(): Promise<TickResult> {
         }
       }
     }
-    return { ok: true, connectionError: false };
+
+    const nextDelayMs =
+      dueTasks.length === WORKER_TASK_BATCH_SIZE
+        ? MIN_WORKER_DELAY_MS
+        : await getNextPendingTaskDelay();
+
+    return { ok: true, connectionError: false, nextDelayMs };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const connErr = isConnectionError(e);
-    // Single-tick connection blips are normal on free-tier Supavisor —
-    // log at WARN so the ERROR channel stays meaningful. The CRITICAL log
-    // inside scheduledWorkerTick() still fires after 5 consecutive tick
-    // failures, which is the signal that actually means something's wrong.
-    const logFn = connErr ? logger.warn.bind(logger) : logger.error.bind(logger);
-    logFn({ err: message, connectionError: connErr, retryInMs: workerDelayMs }, "Worker loop error");
-    return { ok: false, connectionError: connErr };
+    return {
+      ok: false,
+      connectionError: isConnectionError(e),
+      nextDelayMs: CONNECTION_ERROR_BASE_WAIT_MS,
+      err: message
+    };
   }
 }
 
 async function scheduledWorkerTick() {
   if (workerTickRunning) {
-    logger.warn("Worker tick skipped because previous tick is still running");
-    setTimeout(() => void scheduledWorkerTick(), workerDelayMs);
+    scheduleWorkerTick(workerDelayMs);
     return;
   }
 
@@ -327,32 +387,44 @@ async function scheduledWorkerTick() {
 
   if (result.ok) {
     consecutiveDbFailures = 0;
-    workerDelayMs = BASE_WORKER_DELAY_MS;
-  } else if (result.connectionError) {
-    consecutiveDbFailures++;
-    if (consecutiveDbFailures >= 5) {
-      logger.error(
-        { consecutiveDbFailures },
-        'CRITICAL: DB unreachable for 5 consecutive ticks — check Supabase Network Bans at supabase.com/dashboard/project/_/database/settings and verify DATABASE_URL tcp_keepalives_idle parameter is set'
-      );
-      consecutiveDbFailures = 0;
-    }
-    workerDelayMs = BASE_WORKER_DELAY_MS;
-    setTimeout(() => void scheduledWorkerTick(), CONNECTION_ERROR_WAIT_MS);
+    scheduleWorkerTick(consumeRequestedWorkerDelay(result.nextDelayMs));
     return;
-  } else {
-    workerDelayMs = Math.min(workerDelayMs * 2, MAX_WORKER_DELAY_MS);
   }
 
-  setTimeout(() => void scheduledWorkerTick(), workerDelayMs);
+  if (result.connectionError) {
+    consecutiveDbFailures++;
+    const retryInMs = Math.min(
+      CONNECTION_ERROR_BASE_WAIT_MS * 2 ** Math.max(consecutiveDbFailures - 1, 0),
+      CONNECTION_ERROR_MAX_WAIT_MS
+    );
+
+    if (consecutiveDbFailures >= 5) {
+      logger.error(
+        { consecutiveDbFailures, err: result.err, retryInMs },
+        'CRITICAL: DB unreachable for 5 consecutive worker checks - check Supabase Network Bans and DATABASE_URL stability params'
+      );
+      consecutiveDbFailures = 0;
+    } else if (consecutiveDbFailures >= 3) {
+      logger.warn(
+        { consecutiveDbFailures, err: result.err, retryInMs },
+        'Worker DB unavailable; backing off'
+      );
+    }
+
+    scheduleWorkerTick(consumeRequestedWorkerDelay(retryInMs));
+    return;
+  }
+
+  logger.error({ err: result.err, retryInMs: workerDelayMs }, "Worker loop error");
+  scheduleWorkerTick(consumeRequestedWorkerDelay(workerDelayMs));
 }
 
 // Background scheduler
 export function runWorker(): boolean {
   if (workerStarted) return false;
   workerStarted = true;
-  logger.info({ intervalMs: BASE_WORKER_DELAY_MS }, "Worker scheduler started");
-  void scheduledWorkerTick();
+  logger.info({ idleRecheckMs: IDLE_RECHECK_MS }, "Worker scheduler started");
+  scheduleWorkerTick(MIN_WORKER_DELAY_MS);
   return true;
 }
 

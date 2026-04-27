@@ -1,7 +1,6 @@
 node_modules
 .env
 .agents
-.claude
 .code-review-graph
 dist
 build
@@ -9,4 +8,7 @@ build
 .DS_Store
 *.log
 scratch/
-CLAUDE.md
+AGENTS.md
+CONTEXT.md
+ERRORS.md
+.codex

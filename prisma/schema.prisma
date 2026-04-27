@@ -64,6 +64,8 @@ model RetryQueue {
   process_after DateTime @default(now())
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
+
+  @@index([status, process_after, created_at])
 }
 
 model Engagement {
