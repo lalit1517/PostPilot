@@ -7,6 +7,7 @@ build
 .next
 .DS_Store
 *.log
+cloudflare/wrangler.toml
 scratch/
 AGENTS.md
 CONTEXT.md
