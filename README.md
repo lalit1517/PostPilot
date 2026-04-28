@@ -19,7 +19,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
   - [2. Configure environment](#2-configure-environment)
   - [3. Set up the database](#3-set-up-the-database)
   - [4. Set up Telegram bot](#4-set-up-telegram-bot)
-  - [5. Configure n8n](#5-configure-n8n)
+  - [5. Configure Cloudflare Worker Cron](#5-configure-cloudflare-worker-cron)
 - [Database Stability](#database-stability)
 - [Safety & Policy Compliance](#safety--policy-compliance)
 - [Hard Constraints](#hard-constraints)
@@ -47,7 +47,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 | Framework | Express 5 |
 | AI Engine | LangGraph + Google Gemini (via @langchain/google-genai) |
 | Database | PostgreSQL via Prisma ORM (Supabase) |
-| Scheduling | n8n |
+| Scheduling | Cloudflare Worker Cron |
 | Notifications | Telegram Bot API |
 | Logging | Pino |
 | Infrastructure | Render (Compute) + UptimeRobot (Keep-alive) |
@@ -56,7 +56,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 ## 🏗️ Architecture
 
 ```
-n8n (scheduler)           Telegram (notifications)
+Cloudflare Cron           Telegram (notifications)
      |                         ^
      v                         |
   Express API  ──────>  LangGraph Agent  ──────>  Gemini LLM
@@ -72,7 +72,7 @@ n8n (scheduler)           Telegram (notifications)
 
 **Three layers:**
 
-1. **Orchestration** — n8n triggers generation at 08:00, 14:00, 20:00 UTC. Telegram delivers drafts with inline buttons (post, edit, feedback).
+1. **Orchestration** — Cloudflare Worker Cron triggers `/api/cron/generate` at 09:00, 13:30, and 22:00 IST. PostPilot sends Telegram draft notifications directly with inline buttons (post, edit, feedback).
 
 2. **Intelligence** — LangGraph StateGraph with 7 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
 
@@ -123,7 +123,7 @@ Generation (3 LLM calls max)
 
 **Re-roll edge:** `diversityGate -> personaAdapter` (capped at 1 re-roll). On rejection, a **different format archetype** is selected via `getNextFormatWithMeta()` and the rejected fingerprint + draft are persisted to state. `contentGenerator` then injects a `[STRUCTURAL RE-ROLL]` block naming the exact fingerprint and draft the model must NOT reproduce. The reroll routes through `personaAdapter` so the new format + prohibitions bake into the prompt before the retry. `afterDiversityGate` only routes back while `rejectedFingerprint` is still set; accepted drafts clear that marker and advance to `qualityScorer`, preventing repeated generate calls from tripping the 5 RPM guard.
 
-**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, coherenceGate, autoRefiner, and the n8n webhook. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
+**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, coherenceGate, autoRefiner, fingerprint injection, and draft notification. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
@@ -297,6 +297,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | :--- | :--- | :--- |
 | `GET` | `/` | Health check |
 | `POST` | `/api/generate` | Start async tweet generation. Returns `202` with `tweet_id` immediately. |
+| `POST` | `/api/cron/generate` | Cloudflare Cron entrypoint. Idempotent per `scheduled_slot_key`; duplicate retries return the existing tweet. |
 | `GET` | `/api/status?id=` | Poll generation status and latest draft |
 | `GET` | `/api/analytics?id=` | Full engagement time-series for a tweet |
 | `GET` | `/api/post-intent?id=&username=&intent=` | Redirect tracker — logs click-through, enqueues resolution, redirects to X |
@@ -319,7 +320,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
@@ -383,7 +384,7 @@ If the list is empty, the LLM gets a generic "generate a topic from your domains
 
 - Telegram bot (for notifications)
 
-- n8n instance (for scheduling)
+- Cloudflare account (for free Worker Cron scheduling)
 
 ### 1. Install dependencies
 
@@ -422,7 +423,6 @@ HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
 TELEGRAM_BOT_TOKEN=...                 # From @BotFather
 TELEGRAM_CHAT_ID=...                   # Numeric chat ID from @userinfobot — used for bot-initiated alerts (RESOLVE_FAILED, rate-limit warnings)
 TELEGRAM_WEBHOOK_SECRET=...            # Secret token for Telegram webhook verification (see below)
-N8N_WEBHOOK_URL=https://...            # n8n webhook URL for draft-ready callbacks
 INTERNAL_API_KEY=...                   # API key protecting admin + generate endpoints (see below)
 PORT=3000                              # Express server port
 
@@ -478,48 +478,39 @@ npx prisma generate
 
 3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` and the numeric Chat ID as `TELEGRAM_CHAT_ID` in your `.env` or Render variables. `TELEGRAM_CHAT_ID` is used for bot-initiated alerts (e.g. `RESOLVE_FAILED`, rate-limit warnings) that originate from the server rather than as a reply to a user message.
 
-### 5. Configure n8n
+### 5. Configure Cloudflare Worker Cron
 
+PostPilot uses Cloudflare Worker Cron for scheduling and sends draft-ready Telegram messages directly. The server exposes `POST /api/cron/generate`, stores a unique `scheduled_slot_key` per UTC day/slot, and sends the finished draft to Telegram directly. Cloudflare can retry safely because duplicate calls return the existing tweet instead of creating another draft.
 
+1. Copy [`cloudflare/wrangler.toml.example`](cloudflare/wrangler.toml.example) to `cloudflare/wrangler.toml`.
 
-#### Importing Workflows
-1.  **Create Workflows**: In n8n, create two new empty workflows.
+2. From the `cloudflare/` directory, set Worker secrets:
 
-2.  **Import Files**:
-    *   Open Workflow 1 → **Three Dots (Top Right)** → **Import from File** → Select `workflows.json`.
-    *   Open Workflow 2 → **Three Dots (Top Right)** → **Import from File** → Select `workflows-error.json`.
+```bash
+wrangler secret put POSTPILOT_BASE_URL
+wrangler secret put POSTPILOT_INTERNAL_API_KEY
+```
 
-3.  **Set Credentials**: In both workflows, open all **Telegram** nodes and click **Select Credential**. Create a new credential, paste your `TELEGRAM_BOT_TOKEN` as the Access Token, and verify it.
+`POSTPILOT_BASE_URL` should be your Render URL, for example `https://your-app.onrender.com`. `POSTPILOT_INTERNAL_API_KEY` must match the app's `INTERNAL_API_KEY`.
 
-#### Linking the Error Handler
-1.  **Setup Error Workflow**: Open the workflow you imported from `workflows-error.json`. Test it, and then click **Publish** (top right).
+3. Deploy the Worker:
 
-2.  **Link and Publish Main**:
-    *   Open your main workflow (`workflows.json`).
-    *   Click **Three Dots (Top Right)** → **Settings**.
-    *   In the **Error Workflow** dropdown, select the error workflow you just published.
-    *   **Click Publish** (top right) in the main workflow.
+```bash
+wrangler deploy
+```
 
-3.  **Why?**: This ensures the schedules and webhooks are active, and if any node fails, a detailed alert is sent to your Telegram immediately.
+The included cron schedule is:
 
+```toml
+crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
+```
 
+Those are UTC cron expressions for 09:00, 13:30, and 22:00 IST.
 
-#### Manual Node Configuration
-If you are using the provided `workflows.json`, you must perform these manual steps in the n8n UI after importing:
-
-1.  **Timing**: In the **CRON (Generate)** node, set your preferred schedule for tweet generation.
-
+The Worker warms `/`, waits 20 seconds, then calls `/api/cron/generate` with retry delays. Keep UptimeRobot pointed at `/` every 5 minutes. Do not add a DB health monitor.
 
 > [!IMPORTANT]
-> **Recommended**
-> Set only **3 timings per day** (e.g., Morning, Afternoon, Night). 
->
-> **Why?**
-> With a baseline of 3 LLM calls per tweet (up to 4 if a **Diversity Re-roll** is triggered), three scheduled posts consume roughly 9-12 calls. One additional call is reserved daily for **Persona Evolution**. The remaining daily quota serves as a **Safety Buffer** for manual interactions like **Edit Topic** or **Feedback**. Size this buffer from your actual provider quota and keep `src/rateGuard.ts` aligned with it.
-
-*   > **Scaling**: If you want more frequent posts, you must increase the safety gate in `src/rateGuard.ts` — see [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits) below.
-
-*   > **API Limits**: Always check the "RPM" and "RPD" limits provided by your specific AI tier (Google AI Studio, OpenAI, etc.) before increasing these values.
+> With a baseline of 3 LLM calls per tweet (up to 4 if a diversity re-roll is triggered), three scheduled posts consume roughly 9-12 calls/day. One additional call is reserved daily for persona evolution. Keep `src/rateGuard.ts` aligned with the real provider quota before increasing this schedule.
 
 ### Increasing RPM / RPD Limits
 
@@ -531,41 +522,8 @@ const RPM_LIMIT = 5;      // bump to your tier's RPM
 const RPD_LIMIT = 38;     // bump to your tier's RPD
 ```
 
-When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts) (skips diversity/scorer/refiner/webhook), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
+When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
 
-
-2.  **Telegram Buttons**: Pre-baked in `workflows.json` — imports as 4 rows (one button each): `🚀 Open in X`, `✏️ Edit Topic`, `💬 Feedback`, `✅ Posted`. No manual setup needed. If the Reply Markup shows empty after import, the Telegram node `typeVersion` mismatched — re-import or set **Reply Markup** to `Inline Keyboard` and re-save.
-
-3.  **Telegram Settings**: Parse Mode pre-set to `HTML` in `workflows.json`.
-
-4.  **Telegram Text**: Set the **Text** field to the following (Expression):
-    ```html
-    🚀 <b>New X Post Draft - {{ $json.body.topic }}</b>
-    ---
-    <b>Draft:</b>
-    <pre><code>{{ $json.body.htmlDraft || $json.body.draft }}</code></pre>
-
-    <b>Time:</b> {{ $json.body.time_of_day || 'Not set' }}
-    <b>Score:</b> {{ $json.body.score || 0 }}/10
-    ---
-    ```
-
-5.  **Webhook Integration**:
-
-    *   Open the **Webhook (Tweet Ready)** node in n8n.
-    *   Switch to the **Production** tab and copy the **Production URL**.
-    *   In your server's environment variables (Render/`.env`), set `N8N_WEBHOOK_URL` to this copied URL.
-
-6.  **API Credentials**:
-
-    *   In both the **Generate Tweet** and **Process Retries** nodes (HTTP Request), locate the URL and Header fields.
-    *   Replace `{{ $env.BASE_URL }}` with your actual domain (e.g., `https://you.onrender.com`).
-    *   Replace `{{ $env.INTERNAL_API_KEY }}` with your `INTERNAL_API_KEY`.
-    *   In the **Telegram (Notification)** node of `workflows.json` **and** the **Telegram (Error Alert)** node of `workflows-error.json`, replace `{{ $env.TELEGRAM_CHAT_ID }}` in the **Chat ID** field with your numeric chat ID from [@userinfobot](https://t.me/userinfobot).
-
-
-> [!NOTE]
-> Because the n8n free/desktop plan does not support global Environment Variables, you must paste these values manually into the nodes.
 
 ## 🛡️ Database Stability
 
@@ -581,7 +539,7 @@ PostPilot runs in **small-pool mode** (`connection_limit=5`) with **explicit seq
 
 `canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
 
-**Wall-clock impact:** `contextLoader` runs ~400–500ms total (was ~350ms in serialized-Promise.all mode, ~80ms on a real pool). Invisible against the n8n 120s timeout.
+**Wall-clock impact:** `contextLoader` runs ~400–500ms total (was ~350ms in serialized-Promise.all mode, ~80ms on a real pool). Invisible against the Cloudflare Worker retry window.
 
 **Log-level discipline:** middleware retries log at `WARN` (normal recovery, not an alarm). The worker's per-tick connection failures also log at `WARN`. The only `ERROR`/`CRITICAL` line is the one inside `scheduledWorkerTick` that fires after **5 consecutive** connection failures — i.e. "DB has been unreachable for ~5 minutes, something is actually wrong." That's the one line worth paging on. See [Worker & Logging](#-background-workers).
 
@@ -683,7 +641,6 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
    - Add all other keys listed in the [Setup](#setup) section.
 
 > [!TIP]
-> **Pro Tip**: If your n8n workflow uses the `workflows.json` export, ensure the **HTTP Request** nodes have a timeout set to **120 seconds** (120000ms). This gives Render enough time to "wake up" your service from a cold start if the keep-alive pinger hasn't triggered recently.
 
 ### 24/7 Keep-Alive (UptimeRobot)
 

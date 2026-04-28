@@ -20,6 +20,7 @@ model Tweet {
   intent_url     String?
   live_url       String?
   fingerprint    String?        @unique
+  scheduled_slot_key String?     @unique
   posted_at      DateTime?
   telegram_chat_id    String?
   telegram_message_id Int?
