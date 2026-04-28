@@ -489,9 +489,10 @@ PostPilot uses Cloudflare Worker Cron for scheduling and sends draft-ready Teleg
 ```bash
 wrangler secret put POSTPILOT_BASE_URL
 wrangler secret put POSTPILOT_INTERNAL_API_KEY
+wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
 ```
 
-`POSTPILOT_BASE_URL` should be your Render URL, for example `https://your-app.onrender.com`. `POSTPILOT_INTERNAL_API_KEY` must match the app's `INTERNAL_API_KEY`.
+`POSTPILOT_BASE_URL` should be your Render URL, for example `https://your-app.onrender.com`. `POSTPILOT_INTERNAL_API_KEY` must match the app's `INTERNAL_API_KEY`. `POSTPILOT_MANUAL_TRIGGER_TOKEN` is any long random string used in manual trigger URLs.
 
 3. Deploy the Worker:
 
@@ -508,6 +509,23 @@ crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
 Those are UTC cron expressions for 09:00, 13:30, and 22:00 IST.
 
 The Worker warms `/`, waits 20 seconds, then calls `/api/cron/generate` with retry delays. Keep UptimeRobot pointed at `/` every 5 minutes. Do not add a DB health monitor.
+
+Manual generation is available through the Worker:
+
+```text
+https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/morning
+https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/afternoon
+https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night
+```
+
+Optional topic override:
+
+```text
+https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night?topic=why%20dev%20tools%20should%20feel%20faster
+```
+
+Manual calls intentionally use `/api/generate`, so each click creates a new draft.
+The manual URL returns immediately with `Manual <slot> generation queued`; the actual Render request continues in the Worker background. Replace `<POSTPILOT_MANUAL_TRIGGER_TOKEN>` with the real secret value, not the literal placeholder text.
 
 > [!IMPORTANT]
 > With a baseline of 3 LLM calls per tweet (up to 4 if a diversity re-roll is triggered), three scheduled posts consume roughly 9-12 calls/day. One additional call is reserved daily for persona evolution. Keep `src/rateGuard.ts` aligned with the real provider quota before increasing this schedule.

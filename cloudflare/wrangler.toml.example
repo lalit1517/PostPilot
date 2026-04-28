@@ -9,3 +9,4 @@ crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
 # Set these with wrangler secrets, not in this file:
 # wrangler secret put POSTPILOT_BASE_URL
 # wrangler secret put POSTPILOT_INTERNAL_API_KEY
+# wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
