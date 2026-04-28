@@ -1,0 +1,11 @@
+name = "postpilot-cron"
+main = "postpilot-cron-worker.js"
+compatibility_date = "2026-04-28"
+
+[triggers]
+# 9:00 AM, 1:30 PM, and 10:00 PM IST.
+crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
+
+# Set these with wrangler secrets, not in this file:
+# wrangler secret put POSTPILOT_BASE_URL
+# wrangler secret put POSTPILOT_INTERNAL_API_KEY

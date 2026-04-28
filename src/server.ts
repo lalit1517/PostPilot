@@ -50,12 +50,11 @@ app.use(helmet({
 // CORS: restrict origins to known callers
 const ALLOWED_ORIGINS = [
   process.env.BASE_URL,
-  process.env.N8N_WEBHOOK_URL,
 ].filter(Boolean) as string[];
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (server-to-server, curl, n8n, Telegram)
+    // Allow requests with no origin (server-to-server, curl, Telegram)
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.some(allowed => origin.startsWith(allowed))) {
       return callback(null, true);
@@ -102,22 +101,6 @@ function requireApiKey(req: express.Request, res: express.Response, next: expres
 }
 
 // ── URL Validation Helpers ───────────────────────────────────────────────────
-const ALLOWED_CALLBACK_HOSTS = new Set([
-  // Add your n8n host and any other trusted webhook receivers
-  ...(process.env.N8N_WEBHOOK_URL ? [new URL(process.env.N8N_WEBHOOK_URL).host] : []),
-]);
-
-function isAllowedCallbackUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    if (!['https:', 'http:'].includes(parsed.protocol)) return false;
-    if (ALLOWED_CALLBACK_HOSTS.has(parsed.host)) return true;
-    return false;
-  } catch {
-    return false;
-  }
-}
-
 function isAllowedRedirect(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -164,6 +147,47 @@ function escapeHTML(str: string) {
     .replace(/>/g, '&gt;');
 }
 
+const SCHEDULED_SLOTS = ['morning', 'afternoon', 'night'] as const;
+type ScheduledSlot = typeof SCHEDULED_SLOTS[number];
+
+type GenerationPayload = {
+  success: boolean;
+  tweet_id: string;
+  draft: string;
+  topic: string;
+  time_of_day: string;
+  score: number;
+  intentUrl: string;
+  editUrl: string;
+  feedbackUrl: string;
+  token: string;
+  htmlDraft: string;
+  duration: string;
+};
+
+function normalizeTimeOfDay(value: unknown, fallback: ScheduledSlot = 'morning'): ScheduledSlot {
+  return SCHEDULED_SLOTS.includes(value as ScheduledSlot) ? value as ScheduledSlot : fallback;
+}
+
+function getUtcDateKey(date: Date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function inferScheduledSlot(date: Date): ScheduledSlot {
+  const hour = date.getUTCHours();
+  if (hour < 12) return 'morning';
+  if (hour < 18) return 'afternoon';
+  return 'night';
+}
+
+function buildScheduledSlotKey(date: Date, slot: ScheduledSlot) {
+  return `${getUtcDateKey(date)}-${slot}`;
+}
+
+function isValidScheduledSlotKey(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}-(morning|afternoon|night)$/.test(value);
+}
+
 function verifyToken(id: string, token: string) {
   try {
     if (!token) return false;
@@ -175,13 +199,51 @@ function verifyToken(id: string, token: string) {
   }
 }
 
-// Add helper for background processing
-async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, callbackUrl?: string, previousDraft?: string, currentFeedback?: string) {
-  // Validate callbackUrl early to prevent SSRF
-  if (callbackUrl && !isAllowedCallbackUrl(callbackUrl)) {
-    logger.warn({ callbackUrl }, 'Blocked disallowed callbackUrl (SSRF prevention)');
-    callbackUrl = undefined;
+async function createGenerationRecord(input: {
+  timeOfDay: ScheduledSlot;
+  topic?: string | undefined;
+  scheduledSlotKey?: string | undefined;
+}) {
+  const data = {
+    original_topic: input.topic || "AI Generating...",
+    time_of_day: input.timeOfDay,
+    status: 'GENERATING',
+    ...(input.scheduledSlotKey ? { scheduled_slot_key: input.scheduledSlotKey } : {}),
+  };
+
+  try {
+    return {
+      tweet: await prisma.tweet.create({ data }),
+      duplicate: false,
+    };
+  } catch (err: unknown) {
+    const code = typeof err === 'object' && err !== null && 'code' in err ? (err as { code?: string }).code : undefined;
+    if (code !== 'P2002' || !input.scheduledSlotKey) throw err;
+
+    const existing = await prisma.tweet.findUnique({
+      where: { scheduled_slot_key: input.scheduledSlotKey },
+      include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
+    });
+
+    if (!existing) throw err;
+    return { tweet: existing, duplicate: true };
   }
+}
+
+function shouldRestartScheduledGeneration(tweet: {
+  status: string;
+  created_at: Date;
+  versions?: Array<unknown>;
+}) {
+  if (tweet.status === 'ERROR') return true;
+  const staleGenerating = tweet.status === 'GENERATING'
+    && Date.now() - tweet.created_at.getTime() > 30 * 60 * 1000
+    && (!tweet.versions || tweet.versions.length === 0);
+  return staleGenerating;
+}
+
+// Add helper for background processing
+async function processGenerationInBackground(tweetId: string, time_of_day: string, topic?: string, previousDraft?: string, currentFeedback?: string) {
   try {
     const startAgent = Date.now();
     logger.info({ tweetId }, 'Starting background generation...');
@@ -199,8 +261,8 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     let tweetDraft = finalState.draft;
     const finalTopic = finalState.topic;
 
-    // Short-circuit: graph signaled rate-limit exhaustion. Skip webhook + post-graph
-    // diversity check entirely; mark tweet for manual retry and notify Telegram.
+    // Short-circuit: graph signaled rate-limit exhaustion. Skip post-graph
+    // delivery entirely; mark tweet for manual retry and notify Telegram.
     if (finalState.rateLimited) {
       logger.warn({ tweetId }, 'Generation rate-limited; marking tweet and notifying Telegram');
       await prisma.tweet.update({
@@ -289,7 +351,7 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
       data: updateData
     });
 
-    const payload = {
+    const payload: GenerationPayload = {
       success: true,
       tweet_id: tweetId,
       draft: tweetDraft,
@@ -308,19 +370,11 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
     // Diagnostic log — server-side only, never sent to client
     logger.info({ tweetId, draftLen: payload.draft.length }, 'Background generation payload ready');
 
-    // If a callback URL exists (from n8n), send the results there
-    if (callbackUrl) {
-      logger.info({ callbackUrl }, 'Sending result to webhook...');
-      try {
-        await fetch(callbackUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-        logger.info('Webhook delivered successfully');
-      } catch (webhookErr: any) {
-        logger.error({ err: webhookErr.message }, 'Failed to deliver webhook');
-      }
+    try {
+      await sendDraftReadyTelegram(payload);
+    } catch (telegramErr: unknown) {
+      const message = telegramErr instanceof Error ? telegramErr.message : String(telegramErr);
+      logger.warn({ tweetId, err: message }, 'Failed to send direct Telegram draft notification');
     }
   } catch (err: any) {
     logger.error({ tweetId, err: err.message }, 'Background generation failed');
@@ -333,20 +387,17 @@ async function processGenerationInBackground(tweetId: string, time_of_day: strin
 
 app.post('/api/generate', requireApiKey, generateLimiter, async (req, res) => {
   try {
-    const { time_of_day = 'morning', topic, callbackUrl } = req.body || {};
-    logger.info({ time_of_day, topic }, 'Generate request received (Async Mode)');
+    const { time_of_day, topic } = req.body || {};
+    const normalizedTimeOfDay = normalizeTimeOfDay(time_of_day);
+    logger.info({ time_of_day: normalizedTimeOfDay, topic }, 'Generate request received (Async Mode)');
 
-    // 1. Create the database record IMMEDIATELY in 'GENERATING' state
-    const tweet = await prisma.tweet.create({
-      data: {
-        original_topic: topic || "AI Generating...",
-        time_of_day,
-        status: 'GENERATING',
-      }
+    const { tweet } = await createGenerationRecord({
+      timeOfDay: normalizedTimeOfDay,
+      topic,
     });
 
     // 2. Start the process in the background (DO NOT AWAIT)
-    processGenerationInBackground(tweet.id, time_of_day, topic, callbackUrl)
+    processGenerationInBackground(tweet.id, normalizedTimeOfDay, topic)
       .catch(err => logger.error({ err }, 'Fatal background error'));
 
     // 3. Respond to the client instantly
@@ -361,6 +412,64 @@ app.post('/api/generate', requireApiKey, generateLimiter, async (req, res) => {
   } catch (err: any) {
     logger.error({ err: err.message }, 'Failed to initiate generation');
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/cron/generate', requireApiKey, generateLimiter, async (req, res) => {
+  try {
+    const now = new Date();
+    const requestedSlot = normalizeTimeOfDay(req.body?.time_of_day, inferScheduledSlot(now));
+    const scheduledSlotKey = isValidScheduledSlotKey(req.body?.scheduled_slot_key)
+      ? req.body.scheduled_slot_key
+      : buildScheduledSlotKey(now, requestedSlot);
+    const topic = typeof req.body?.topic === 'string' && req.body.topic.trim()
+      ? req.body.topic.trim()
+      : undefined;
+
+    logger.info({ scheduledSlotKey, time_of_day: requestedSlot }, 'Cron generate request received');
+
+    const { tweet, duplicate } = await createGenerationRecord({
+      timeOfDay: requestedSlot,
+      topic,
+      scheduledSlotKey,
+    });
+
+    if (duplicate && !shouldRestartScheduledGeneration(tweet)) {
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: "Scheduled slot already has a generation record",
+        tweet_id: tweet.id,
+        status: tweet.status,
+        scheduled_slot_key: scheduledSlotKey,
+        checkStatusUrl: `${process.env.BASE_URL || 'http://localhost:3000'}/api/status?id=${tweet.id}`
+      });
+    }
+
+    if (duplicate) {
+      await prisma.tweet.update({
+        where: { id: tweet.id },
+        data: { status: 'GENERATING' },
+      });
+      logger.warn({ tweetId: tweet.id, scheduledSlotKey }, 'Restarting stale/failed scheduled generation');
+    }
+
+    processGenerationInBackground(tweet.id, requestedSlot, topic)
+      .catch(err => logger.error({ err }, 'Fatal cron background error'));
+
+    return res.status(202).json({
+      success: true,
+      duplicate,
+      message: duplicate ? "Scheduled generation restarted" : "Scheduled generation started",
+      tweet_id: tweet.id,
+      status: 'GENERATING',
+      scheduled_slot_key: scheduledSlotKey,
+      checkStatusUrl: `${process.env.BASE_URL || 'http://localhost:3000'}/api/status?id=${tweet.id}`
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, 'Failed to initiate cron generation');
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -751,6 +860,51 @@ async function sendTelegramMessage(chatId: number | string, text: string) {
   });
 }
 
+async function sendDraftReadyTelegram(payload: GenerationPayload) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    logger.warn({ tweetId: payload.tweet_id }, 'Telegram token/chat not configured; skipping draft notification');
+    return;
+  }
+
+  const text = [
+    `<b>New X Post Draft - ${escapeHTML(payload.topic)}</b>`,
+    '---',
+    '<b>Draft:</b>',
+    `<pre><code>${payload.htmlDraft}</code></pre>`,
+    '',
+    `<b>Time:</b> ${escapeHTML(payload.time_of_day)}`,
+    `<b>Score:</b> ${payload.score || 0}/10`,
+    '---',
+  ].join('\n');
+
+  const replyMarkup = {
+    inline_keyboard: [
+      [{ text: "Open in X", url: payload.intentUrl }],
+      [{ text: "Edit Topic", url: payload.editUrl }],
+      [{ text: "Feedback", url: payload.feedbackUrl }],
+      [{ text: "Posted", callback_data: `pc:${payload.tweet_id}:${payload.token.substring(0, 8)}` }],
+    ],
+  };
+
+  const result = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: replyMarkup,
+    })
+  });
+
+  if (!result.ok) {
+    const body = await result.text();
+    throw new Error(`Telegram sendMessage failed: ${result.status} ${body}`);
+  }
+}
+
 app.post('/api/edit', async (req, res) => {
   const { id, new_topic, token } = req.body;
   if (!verifyToken(id, token)) return res.status(403).json({ error: "Unauthorized" });
@@ -770,11 +924,7 @@ app.post('/api/edit', async (req, res) => {
 
   logger.info({ tweet_id: id, new_topic }, 'Topic edited, requesting immediate regeneration');
 
-  const webhookUrl = process.env.N8N_WEBHOOK_URL;
-  if (!webhookUrl) {
-    logger.warn('N8N_WEBHOOK_URL not configured, regeneration callback will be skipped');
-  }
-  processGenerationInBackground(id, updatedTweet.time_of_day, new_topic, webhookUrl)
+  processGenerationInBackground(id, updatedTweet.time_of_day, new_topic)
     .catch(err => logger.error({ err }, 'Regeneration background error'));
 
   res.json({ success: true, message: "Regenerating! You'll receive a new Telegram message shortly." });
@@ -799,11 +949,10 @@ app.post('/api/feedback', async (req, res) => {
   logger.info({ tweet_id: id }, 'Feedback received, requesting immediate regeneration');
 
   if (tweet) {
-    const webhookUrl = process.env.N8N_WEBHOOK_URL;
     const topicToUse = tweet.edited_topic || tweet.original_topic;
     const oldDraft = tweet.versions[0]?.content || "";
 
-    processGenerationInBackground(id, tweet.time_of_day, topicToUse, webhookUrl, oldDraft, feedback)
+    processGenerationInBackground(id, tweet.time_of_day, topicToUse, oldDraft, feedback)
       .catch(err => logger.error({ err }, 'Regeneration background error'));
   }
 
