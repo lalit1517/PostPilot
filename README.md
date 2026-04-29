@@ -28,7 +28,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 ## 💡 Core Innovations
 
 
-- **Invisible Fingerprinting**: Programmatic tweet-resolution using zero-width Unicode characters. This "watermarks" every draft, allowing the background worker to link live tweets to specific LLM versions without requiring the expensive official X API. 🔒
+- **Layered Tweet Resolution**: Programmatic tweet-resolution using zero-width Unicode fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. This links live tweets to specific LLM versions without requiring the expensive official X API. 🔒
 
 - **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Two-Layer Trend Relevance Filter** (regex hard-exclude + domain keyword scoring), **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
 
@@ -114,7 +114,7 @@ Generation (3 LLM calls max)
 | Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 38 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
 
 
 ## 🧠 AI Agent (LangGraph)
@@ -188,7 +188,9 @@ When a draft arrives in Telegram, you get four buttons. Here's exactly what each
 
 3. You post it manually on X
 
-4. 10 minutes later, `RESOLVE_TWEET` fires automatically and matches the fingerprint → marks `POSTED_CONFIRMED` → starts engagement tracking
+4. 10 minutes later, `RESOLVE_TWEET` fires automatically. On success, it marks the tweet `POSTED_CONFIRMED`, replaces the Telegram keyboard with a single inert **"✅ Marked as Posted"** button, and starts engagement tracking.
+
+PostPilot stores the Telegram `chat_id` + `message_id` as soon as the draft message is sent, because URL buttons do not send callback metadata when tapped. That stored message reference is what lets the worker update the original Telegram message after automatic resolution.
 
 
 **✅ Posted** — manual override only. Use this when:
@@ -199,42 +201,48 @@ When a draft arrives in Telegram, you get four buttons. Here's exactly what each
 
 - You posted but the auto-detection silently failed
 
-Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, persists the Telegram `chat_id` + `message_id` on the Tweet row, and **mutates the button label to "✅ Marked as Posted"** in the same Telegram message.
+Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, persists the Telegram `chat_id` + `message_id` on the Tweet row, and changes the button row to **"☑️ Post Confirmed"** while keeping **Open in X**, **Edit Topic**, and **Feedback** visible. This is an optimistic user confirmation, not final resolver proof.
 
-If `RESOLVE_TWEET` still finds nothing after all retries (~55 min total: 10 min initial + 45 min fallback), the worker:
+If `RESOLVE_TWEET` still finds nothing after all retries (~62 min total: 10 min initial delay + ~7 min short retry + ~45 min final retry), the worker:
 
 1. Marks the tweet `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null`.
-2. Edits the original Telegram message via `editMessageReplyMarkup`, replacing the button with **"↩️ Not Posted (resolution failed)"**.
+2. Edits the original Telegram message via `editMessageReplyMarkup`, replacing the full keyboard with one inert **"↩️ Not Posted"** button.
+
+If the resolver finds the tweet, it replaces the full keyboard with one inert **"✅ Marked as Posted"** button. Final buttons use `callback_data: "noop"` and only answer Telegram's callback spinner; they do not write to the database or enqueue more work.
 
 > The worker resolution guard skips on `live_url` set or `status === 'RESOLVE_FAILED'` — NOT on `posted=true`. The manual click sets `posted=true` optimistically; gating on it would silently drop every manual-confirm task before it polls. Earlier versions had this bug — the button never changed back even after hours.
 
-This covers two common cases: you clicked ✅ Posted but never actually posted, or the tweet got deleted/unpublished before the worker could confirm it. No manual cleanup needed — the Telegram message self-corrects.
+This covers two common cases: you clicked ✅ Posted but never actually posted, or the tweet got deleted/unpublished before the worker could confirm it. No manual cleanup needed — the Telegram message self-corrects after resolver success or final failure.
 
-> **You almost never need the Posted button.** Open in X handles everything automatically via fingerprint. Posted is the escape hatch for when things go wrong.
+> **You almost never need the Posted button.** Open in X handles everything automatically through the layered resolver. Posted is the escape hatch for when you want to optimistically confirm that you posted.
 
 
 **✏️ Edit Topic / 💬 Feedback** — open secure HMAC-signed web forms. Submit triggers a full regeneration with the new topic or feedback injected into the pipeline.
 
 
-**📋 Copy** — sends the raw draft text to your Telegram chat for manual copy-paste.
+There is no final "undo" action on **Marked as Posted** or **Not Posted**. Those buttons are intentionally inert final-state indicators; corrections should be handled in the database or by generating a new draft.
 
 ### RESOLVE_TWEET
 
 
 
-Detects posted tweets via invisible fingerprint matching.
+Detects posted tweets via a layered resolver: exact invisible fingerprint match first, tolerant truncated-fingerprint match second, and visible-text fallback last.
 
-1. Triggered 10 minutes after user confirms posting (via Telegram button or intent link redirect).
+1. Triggered 10 minutes after the signed X intent redirect or manual Posted confirmation.
 
 2. Polls a shuffled Nitter source list (override with `NITTER_INSTANCES`; built-in default includes `nitter.net`, `xcancel.com`, `nitter.privacyredirect.com`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`, `nitter.tiekoetter.com`, `lightbrd.com`) and falls back to the native Twitter timeline with browser-like headers. Hosts that return `403`, `429`, `5xx`, or fetch failures are cooled down for 30 minutes.
 
-3. Matches the 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
+3. Primary match: looks for the exact 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 
-4. On match: marks tweet as `POSTED_CONFIRMED`, schedules first engagement fetch.
+4. Secondary match: accepts a 28-31 zero-width-character run only when it decodes to a strong prefix of the stored fingerprint **and** nearby visible text matches the stored draft. This handles mobile/X clients that trim a trailing zero-width character.
 
-5. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null` — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+5. Fallback match: extracts same-author tweet candidates from X/Nitter responses and compares normalized visible text against the stored `TweetVersion.content`. Candidates must be recent; when `created_at` is missing, the worker derives the timestamp from the X snowflake ID.
 
-**Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit any visible part of the tweet in X's compose box, including adding, changing, or removing text and punctuation. The fingerprint is only destroyed if you delete characters past the last visible character (i.e. backspace through the trailing space into the invisible suffix), or select-all and retype. When in doubt: edit the middle, leave the end alone.
+6. On match: marks tweet as `POSTED_CONFIRMED`, updates the Telegram message to the final **"✅ Marked as Posted"** button, and schedules the first engagement fetch.
+
+7. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED`, resets `posted=false`, `posted_at=null`, and updates the Telegram message to the final **"↩️ Not Posted"** button — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+
+**Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit visible text, but changing the final text heavily can weaken the visible-text fallback. The resolver can tolerate some trailing zero-width truncation, but deleting through the invisible suffix, select-all retyping, or posting a substantially different draft can still force `RESOLVE_FAILED`.
 
 ### FETCH_ENGAGEMENT
 
@@ -305,7 +313,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `GET` | `/api/view-feedback?id=&token=` | HTML form for feedback submission |
 | `POST` | `/api/edit` | Update topic + trigger regeneration |
 | `POST` | `/api/feedback` | Submit feedback + trigger regeneration |
-| `POST` | `/api/telegram/webhook` | Telegram bot callback handler (posted confirmation, copy tweet) |
+| `POST` | `/api/telegram/webhook` | Telegram bot callback handler (posted confirmation and inert final-state buttons) |
 | `GET` | `/api/admin/rate-status` | Current RPM/RPD consumption and remaining budget from `LlmCallLog` |
 | `GET` | `/api/admin/failed-tasks?limit=N` | Dead letter queue — inspect `RetryQueue` rows with `status = FAILED` |
 | `GET` | `/api/admin/engagement-pattern` | Aggregates `TweetOutcome` by `time_of_day`, `day_of_week`, and the time × day pivot |
@@ -320,7 +328,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted on ✅ Posted click so worker can revert the button to "↩️ Not Posted" on `RESOLVE_FAILED`) |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted when the draft is sent to Telegram, and refreshed on manual ✅ Posted clicks, so the worker can replace the original message with final "✅ Marked as Posted" or "↩️ Not Posted" state) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
@@ -448,7 +456,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 `INTERNAL_API_KEY` is required in the `X-API-Key` header for `/api/generate`, `/api/cron/generate`, `/api/status`, `/api/analytics`, `/api/status/:id/timeline`, `/api/admin/*`, and `/api/retries/process` requests.
 
-**Register the Telegram webhook** — without this, button clicks (✅ Posted, 📋 Copy) never reach the server and nothing happens. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
+**Register the Telegram webhook** — without this, button clicks such as ✅ Posted and final-state no-op acknowledgements never reach the server and Telegram buttons can appear stuck. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
 
 ```
 https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
@@ -766,12 +774,12 @@ Do not point UptimeRobot at `/api/cron/generate`, `/api/generate`, or any databa
 
 ### Increasing RPM / RPD Limits
 
-Defaults are set in [`src/rateGuard.ts`](src/rateGuard.ts) and must match your active Google AI tier/model quota. Current app-side settings are 5 RPM / 38 RPD:
+Defaults are set in [`src/rateGuard.ts`](src/rateGuard.ts) and must match your active Google AI tier/model quota. Current app-side settings are 5 RPM / 19 RPD:
 
 ```typescript
 // src/rateGuard.ts
 const RPM_LIMIT = 5;      // bump to your tier's RPM
-const RPD_LIMIT = 38;     // bump to your tier's RPD
+const RPD_LIMIT = 19;     // bump to your tier's RPD
 ```
 
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
@@ -934,7 +942,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Human-in-the-Loop (HITL)**: AI drafts, you post. No account credentials ever handed to an automated script — you stay a regular user in X's eyes.
 
-- **Invisible Fingerprinting**: Zero-width Unicode (`U+200B`/`U+200C`) links drafts to engagement without using the Official X API or visible tracking IDs.
+- **Layered Resolution**: Zero-width Unicode (`U+200B`/`U+200C`) fingerprints, tolerant truncated-fingerprint matching, and visible-text fallback link drafts to engagement without using the Official X API or visible tracking IDs.
 
 - **Decoupled Scraping**: Tracking via Nitter + public Syndication API. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
@@ -946,7 +954,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
-- **Google AI Studio limits:** current app-side guard is 5 RPM / 38 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
+- **Google AI Studio limits:** current app-side guard is 5 RPM / 19 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
 
 - **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 
