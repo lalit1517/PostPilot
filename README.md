@@ -296,11 +296,11 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/` | Health check |
-| `POST` | `/api/generate` | Start async tweet generation. Returns `202` with `tweet_id` immediately. |
-| `POST` | `/api/cron/generate` | Cloudflare Cron entrypoint. Idempotent per `scheduled_slot_key`; duplicate retries return the existing tweet. |
-| `GET` | `/api/status?id=` | Poll generation status and latest draft |
-| `GET` | `/api/analytics?id=` | Full engagement time-series for a tweet |
-| `GET` | `/api/post-intent?id=&username=&intent=` | Redirect tracker — logs click-through, enqueues resolution, redirects to X |
+| `POST` | `/api/generate` | Protected async tweet generation. Returns `202` with `tweet_id` immediately. |
+| `POST` | `/api/cron/generate` | Protected Cloudflare Cron entrypoint. Idempotent per `scheduled_slot_key`; duplicate retries return the existing tweet. |
+| `GET` | `/api/status?id=` | Protected generation status and latest draft lookup |
+| `GET` | `/api/analytics?id=` | Protected engagement time-series for a tweet |
+| `GET` | `/api/post-intent?id=&username=&intent=&token=` | Signed redirect tracker — logs click-through, enqueues resolution, redirects to X |
 | `GET` | `/api/view-edit?id=&token=` | HTML form for topic editing |
 | `GET` | `/api/view-feedback?id=&token=` | HTML form for feedback submission |
 | `POST` | `/api/edit` | Update topic + trigger regeneration |
@@ -446,7 +446,7 @@ Generate `INTERNAL_API_KEY` (base64, URL-safe):
 node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 ```
 
-`INTERNAL_API_KEY` is required in the `X-API-Key` header for all `/api/admin/*`, `/api/generate`, and `/api/retries/process` requests.
+`INTERNAL_API_KEY` is required in the `X-API-Key` header for `/api/generate`, `/api/cron/generate`, `/api/status`, `/api/analytics`, `/api/status/:id/timeline`, `/api/admin/*`, and `/api/retries/process` requests.
 
 **Register the Telegram webhook** — without this, button clicks (✅ Posted, 📋 Copy) never reach the server and nothing happens. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
 
@@ -480,42 +480,184 @@ npx prisma generate
 
 ### 5. Configure Cloudflare Worker Cron
 
-PostPilot uses Cloudflare Worker Cron for scheduling and sends draft-ready Telegram messages directly. The server exposes `POST /api/cron/generate`, stores a unique `scheduled_slot_key` per UTC day/slot, and sends the finished draft to Telegram directly. Cloudflare can retry safely because duplicate calls return the existing tweet instead of creating another draft.
+PostPilot uses **Cloudflare Worker Cron** for scheduling.
 
-1. Copy [`cloudflare/wrangler.toml.example`](cloudflare/wrangler.toml.example) to `cloudflare/wrangler.toml`.
+The Worker calls the protected `POST /api/cron/generate` endpoint on your Render app. PostPilot stores a unique `scheduled_slot_key` per UTC day/slot, so Cloudflare retries and Render cold-start repeats do not create duplicate scheduled drafts. Finished drafts are sent directly from PostPilot to Telegram.
 
-2. From the `cloudflare/` directory, set Worker secrets:
+The included schedule is:
 
-```bash
-wrangler secret put POSTPILOT_BASE_URL
-wrangler secret put POSTPILOT_INTERNAL_API_KEY
-wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
+| Local time | UTC cron | Slot |
+|---|---|---|
+| 09:00 IST | `30 3 * * *` | `morning` |
+| 13:30 IST | `0 8 * * *` | `afternoon` |
+| 22:00 IST | `30 16 * * *` | `night` |
+
+#### One-time Worker setup
+
+From the repo root, enter the Worker folder and create the local Wrangler config.
+
+Windows PowerShell:
+
+```powershell
+cd E:\PostPilot\cloudflare
+Copy-Item wrangler.toml.example wrangler.toml
 ```
 
-`POSTPILOT_BASE_URL` should be your Render URL, for example `https://your-app.onrender.com`. `POSTPILOT_INTERNAL_API_KEY` must match the app's `INTERNAL_API_KEY`. `POSTPILOT_MANUAL_TRIGGER_TOKEN` is any long random string used in manual trigger URLs.
-
-3. Deploy the Worker:
+macOS/Linux:
 
 ```bash
-wrangler deploy
+cd /path/to/PostPilot/cloudflare
+cp wrangler.toml.example wrangler.toml
 ```
 
-The included cron schedule is:
+`cloudflare/wrangler.toml` is local deploy config. Keep it untracked; commit `cloudflare/wrangler.toml.example` instead.
+
+Log in to Cloudflare.
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler login
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler login
+```
+
+If PowerShell blocks `npx` with an execution-policy error, use `npx.cmd` as shown above, or use `cmd /c npx ...`.
+
+#### Worker secrets
+
+Set these Cloudflare Worker secrets. They are stored in Cloudflare, not in `wrangler.toml`.
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler secret put POSTPILOT_BASE_URL
+npx.cmd wrangler secret put POSTPILOT_INTERNAL_API_KEY
+npx.cmd wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler secret put POSTPILOT_BASE_URL
+npx wrangler secret put POSTPILOT_INTERNAL_API_KEY
+npx wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
+```
+
+On Windows PowerShell, if copy-paste behaves oddly in the interactive secret prompt, type the value manually. This matters especially for `POSTPILOT_BASE_URL`; a bad paste can store corrupted text and the Worker will later fail with an invalid URL. You can also avoid the interactive prompt by piping the value.
+
+Windows PowerShell:
+
+```powershell
+"https://your-app.onrender.com" | npx.cmd wrangler secret put POSTPILOT_BASE_URL
+"your-render-internal-api-key" | npx.cmd wrangler secret put POSTPILOT_INTERNAL_API_KEY
+"your-manual-trigger-token" | npx.cmd wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
+```
+
+macOS/Linux:
+
+```bash
+printf '%s' 'https://your-app.onrender.com' | npx wrangler secret put POSTPILOT_BASE_URL
+printf '%s' 'your-render-internal-api-key' | npx wrangler secret put POSTPILOT_INTERNAL_API_KEY
+printf '%s' 'your-manual-trigger-token' | npx wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
+```
+
+Secret values:
+
+| Secret | Value |
+|---|---|
+| `POSTPILOT_BASE_URL` | Your Render app URL, e.g. `https://your-app.onrender.com` |
+| `POSTPILOT_INTERNAL_API_KEY` | Same value as Render's `INTERNAL_API_KEY` |
+| `POSTPILOT_MANUAL_TRIGGER_TOKEN` | Any long random string used in manual trigger URLs |
+
+Generate a manual trigger token:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+```
+
+Verify the secrets exist:
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler secret list
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler secret list
+```
+
+You should see:
+
+```text
+POSTPILOT_BASE_URL
+POSTPILOT_INTERNAL_API_KEY
+POSTPILOT_MANUAL_TRIGGER_TOKEN
+```
+
+#### Deploy the Worker
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler deploy
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler deploy
+```
+
+Successful deploy output shows the Worker URL and cron triggers, for example:
+
+```text
+https://postpilot-cron.<your-subdomain>.workers.dev
+schedule: 30 3 * * *
+schedule: 0 8 * * *
+schedule: 30 16 * * *
+```
+
+The first deploy may ask you to register a `workers.dev` subdomain. Choose any unique name. That public Worker URL is normal; it does not expose your secrets.
+
+Optional: if you do not want a public Worker route except for cron/manual paths, add this to `cloudflare/wrangler.toml` and redeploy:
 
 ```toml
-crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
+workers_dev = false
+preview_urls = false
 ```
 
-Those are UTC cron expressions for 09:00, 13:30, and 22:00 IST.
+Do not disable `workers_dev` if you want browser-based manual trigger URLs.
 
-The Worker warms `/`, waits 20 seconds, then calls `/api/cron/generate` with retry delays. Keep UptimeRobot pointed at `/` every 5 minutes. Do not add a DB health monitor.
+#### Manual generation
 
-Manual generation is available through the Worker:
+The Worker also provides simple protected browser/bookmark URLs for manual generation:
 
 ```text
 https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/morning
 https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/afternoon
 https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night
+```
+
+During the first `wrangler deploy`, Cloudflare may ask you to choose a `workers.dev` subdomain. Put that chosen subdomain where this guide shows `example-user`. For example, if Cloudflare gives you `https://postpilot-cron.example-user.workers.dev`, the bookmark formats are:
+
+```text
+Morning: https://postpilot-cron.example-user.workers.dev/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/morning
+Lunch:   https://postpilot-cron.example-user.workers.dev/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/afternoon
+Dinner:  https://postpilot-cron.example-user.workers.dev/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night
+```
+
+Example using a placeholder token:
+
+```text
+https://postpilot-cron.example-user.workers.dev/manual/YOUR_ACTUAL_TOKEN/night
 ```
 
 Optional topic override:
@@ -524,8 +666,100 @@ Optional topic override:
 https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night?topic=why%20dev%20tools%20should%20feel%20faster
 ```
 
-Manual calls intentionally use `/api/generate`, so each click creates a new draft.
-The manual URL returns immediately with `Manual <slot> generation queued`; the actual Render request continues in the Worker background. Replace `<POSTPILOT_MANUAL_TRIGGER_TOKEN>` with the real secret value, not the literal placeholder text.
+Expected browser response is the PostPilot `/api/generate` JSON response:
+
+```json
+{
+  "success": true,
+  "message": "Generation started in background",
+  "tweet_id": "...",
+  "status": "GENERATING",
+  "checkStatusUrl": "..."
+}
+```
+
+The manual URL waits until PostPilot accepts the request, then the finished draft arrives in Telegram. Replace `<POSTPILOT_MANUAL_TRIGGER_TOKEN>` with the real token value; do not use the literal placeholder text.
+
+Manual calls intentionally use `/api/generate`, so every click creates a new draft. Scheduled calls use `/api/cron/generate`, which is idempotent per scheduled slot.
+
+#### Logs and debugging
+
+Tail Worker logs:
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler tail
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler tail
+```
+
+Useful log lines:
+
+```text
+PostPilot cron trigger accepted
+PostPilot manual trigger accepted
+PostPilot manual trigger failed
+```
+
+If a manual trigger returns `Unauthorized`, your URL token does not match `POSTPILOT_MANUAL_TRIGGER_TOKEN`. If the Worker logs `HTTP 401`, `POSTPILOT_INTERNAL_API_KEY` does not match Render's `INTERNAL_API_KEY`.
+
+#### Changing schedule or timezone
+
+Cloudflare cron expressions are evaluated in **UTC**, not local time. Convert your desired local time to UTC before editing `cloudflare/wrangler.toml`.
+
+For IST, subtract 5 hours 30 minutes:
+
+```text
+09:00 IST -> 03:30 UTC -> 30 3 * * *
+13:30 IST -> 08:00 UTC -> 0 8 * * *
+22:00 IST -> 16:30 UTC -> 30 16 * * *
+```
+
+Update two files when changing the schedule:
+
+1. `cloudflare/wrangler.toml` or `cloudflare/wrangler.toml.example`
+
+```toml
+[triggers]
+crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
+```
+
+2. `cloudflare/postpilot-cron-worker.js`
+
+```js
+const SCHEDULE_TO_SLOT = {
+  '30 3 * * *': 'morning',
+  '0 8 * * *': 'afternoon',
+  '30 16 * * *': 'night',
+};
+```
+
+Then redeploy the Worker.
+
+Windows PowerShell:
+
+```powershell
+npx.cmd wrangler deploy
+```
+
+macOS/Linux:
+
+```bash
+npx wrangler deploy
+```
+
+Keep UptimeRobot pointed at your Render root URL every 5 minutes:
+
+```text
+https://<your-app-name>.onrender.com/
+```
+
+Do not point UptimeRobot at `/api/cron/generate`, `/api/generate`, or any database health endpoint.
 
 > [!IMPORTANT]
 > With a baseline of 3 LLM calls per tweet (up to 4 if a diversity re-roll is triggered), three scheduled posts consume roughly 9-12 calls/day. One additional call is reserved daily for persona evolution. Keep `src/rateGuard.ts` aligned with the real provider quota before increasing this schedule.

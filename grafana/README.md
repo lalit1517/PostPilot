@@ -6,7 +6,7 @@ Three pre-built dashboards. One command to provision everything. No manual click
 
 | Dashboard | Panels | Purpose |
 |---|---|---|
-| Tweet Performance | 11 | Lifecycle table, status breakdown, outcome scores, engagement curves, posting slot heatmap, topic leaderboard |
+| Tweet Performance | 11 | Lifecycle table with scheduled/manual source, status breakdown, outcome scores, engagement curves, posting slot heatmap, topic leaderboard |
 | System Health | 14 | LLM budget gauges, worker queue, resolution funnel, failed/pending task tables |
 | Learning Loop | 15 | Quality trends, Pearson r, feedback, sentiment, persona evolution, topic blacklist |
 
