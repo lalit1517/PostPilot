@@ -343,7 +343,15 @@ async function contextLoader(state: typeof AgentState.State) {
 
   // Derive topic selection + topic-free mode flag.
   let topicFree = false;
-  let resolvedTopic = state.topic ?? '';
+  let resolvedTopic = (state.topic ?? '').trim();
+  if (resolvedTopic && isTopicOnCooldown(resolvedTopic)) {
+    blacklistInfo.list = Array.from(new Set([...blacklistInfo.list, resolvedTopic.toLowerCase()]));
+    logger.warn(
+      { topic: resolvedTopic },
+      "Requested topic is on cooldown; clearing it so generation picks a fresh topic",
+    );
+    resolvedTopic = '';
+  }
   if (!resolvedTopic) {
     if (relevantTrends.length === 0) {
       topicFree = true;
@@ -870,16 +878,22 @@ async function autoRefiner(state: typeof AgentState.State) {
   }
 }
 
-function shouldRefine(state: typeof AgentState.State): "autoRefiner" | typeof END {
+function finalTopicMemory(state: typeof AgentState.State) {
+  if (state.topic) {
+    recordTopicUsed(state.topic);
+    logger.info({ topic: state.topic }, "Recorded final topic in cooldown memory");
+  }
+  return {};
+}
+
+function shouldRefine(state: typeof AgentState.State): "autoRefiner" | "finalTopicMemory" {
   if (state.coherent === false) {
     logger.info("Coherence mismatch — forcing refiner pass for topic grounding");
     return "autoRefiner";
   }
   if (state.score >= 8) {
     logger.info({ score: state.score }, "Score >= 8, skipping autoRefiner");
-    // Record the topic as used only on successful final gate pass.
-    if (state.topic) recordTopicUsed(state.topic);
-    return END;
+    return "finalTopicMemory";
   }
   return "autoRefiner";
 }
@@ -892,6 +906,7 @@ const workflow = new StateGraph(AgentState)
   .addNode("qualityScorer", qualityScorer)
   .addNode("coherenceGate", coherenceGate)
   .addNode("autoRefiner", autoRefiner)
+  .addNode("finalTopicMemory", finalTopicMemory)
 
   .addEdge(START, "contextLoader")
   .addEdge("contextLoader", "personaAdapter")
@@ -900,6 +915,7 @@ const workflow = new StateGraph(AgentState)
   .addConditionalEdges("diversityGate", afterDiversityGate)
   .addEdge("qualityScorer", "coherenceGate")
   .addConditionalEdges("coherenceGate", shouldRefine)
-  .addEdge("autoRefiner", END);
+  .addEdge("autoRefiner", "finalTopicMemory")
+  .addEdge("finalTopicMemory", END);
 
 export const agentGraph = workflow.compile();

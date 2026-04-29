@@ -1,5 +1,5 @@
 // Express API + monolith entrypoint. Async /api/generate, Telegram webhook, admin endpoints.
-// Starts the in-process worker after the DB accepts a probe query. See CLAUDE.md §3.
+// Starts the in-process worker after the DB accepts a probe query.
 import "dotenv/config";
 import express from "express";
 import crypto from "crypto";
@@ -10,7 +10,6 @@ import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import { agentGraph } from "./agent.js";
 import { generateUniqueFingerprint, appendFingerprint } from "./fingerprint.js";
-import { checkDraftDiversity } from "./draftDiversity.js";
 import { getRateStatus } from "./rateGuard.js";
 import {
   getEngagementPattern,
@@ -140,7 +139,7 @@ function verifyTelegramWebhook(req: express.Request): boolean {
 }
 
 // Health Check Endpoint
-app.get("/", (req, res) => {
+app.get("/", (_req, res) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
@@ -156,8 +155,6 @@ if (!HMAC_SECRET) {
 function generateToken(id: string) {
   return crypto.createHmac("sha256", HMAC_SECRET).update(id).digest("hex");
 }
-
-const CALL_TIMEOUT = 300_000; // Increased to 5 minutes for stable generation
 
 function escapeHTML(str: string) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -327,18 +324,6 @@ async function processGenerationInBackground(
     }
 
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
-
-    const diversity = await checkDraftDiversity(tweetDraft, tweetId);
-    if (diversity.duplicate) {
-      logger.warn(
-        {
-          tweetId,
-          similarity: diversity.maxSimilarity,
-          matchedTweetId: diversity.matchedTweetId,
-        },
-        "Draft too similar to recent tweets",
-      );
-    }
 
     const currentTweet = await prisma.tweet.findUnique({
       where: { id: tweetId },
@@ -880,7 +865,7 @@ app.post("/api/telegram/webhook", async (req, res) => {
     return res.status(403).json({ error: "Forbidden" });
   }
 
-  const { callback_query, message } = req.body;
+  const { callback_query } = req.body;
 
   if (callback_query) {
     const chatId = callback_query.message.chat.id;
@@ -1262,14 +1247,6 @@ app.get("/api/admin/quality-correlation", requireApiKey, async (_req, res) => {
   }
 });
 
-app.post("/api/retries/process", requireApiKey, async (req, res) => {
-  logger.info("Manual processing of retry queue requested");
-  res.json({
-    success: true,
-    message: "Queue is processed by background worker automatically",
-  });
-});
-
 app.get("/api/post-intent", async (req, res) => {
   const { id, username, intent, token } = req.query;
   if (!id || !username || !intent || !token) {
@@ -1370,6 +1347,6 @@ process.on("uncaughtException", (err) => {
   logger.error({ err: err.message, stack: err.stack }, "Uncaught Exception");
 });
 
-process.on("unhandledRejection", (reason, promise) => {
+process.on("unhandledRejection", (reason) => {
   logger.error({ reason }, "Unhandled Rejection");
 });
