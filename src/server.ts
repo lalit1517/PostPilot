@@ -884,7 +884,21 @@ app.post("/api/telegram/webhook", async (req, res) => {
 
   if (callback_query) {
     const chatId = callback_query.message.chat.id;
-    const [action, tweetId, token] = (callback_query.data || "").split(":");
+    const callbackData = callback_query.data || "";
+
+    if (callbackData === "noop") {
+      await fetch(
+        `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/answerCallbackQuery`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: callback_query.id }),
+        },
+      );
+      return res.sendStatus(200);
+    }
+
+    const [action, tweetId, token] = callbackData.split(":");
 
     if (!tweetId || !token || !verifyToken(tweetId, token)) {
       return res.status(403).json({ error: "Invalid token" });
@@ -928,7 +942,8 @@ app.post("/api/telegram/webhook", async (req, res) => {
         logger.error("Failed to enqueue resolution");
       }
 
-      // Mutate the original Telegram message: replace buttons with "Marked as Posted" state
+      // Manual confirmation is optimistic; keep actions visible until resolver
+      // confirms success/failure and replaces this with a final inert button.
       const messageId = callback_query.message.message_id;
       const baseUrl = process.env.BASE_URL || "";
       const postedToken = generateToken(tweetId);
@@ -952,7 +967,7 @@ app.post("/api/telegram/webhook", async (req, res) => {
               url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}`,
             },
           ],
-          [{ text: "✅ Marked as Posted", callback_data: "noop" }],
+          [{ text: "☑️ Post Confirmed", callback_data: "noop" }],
         ],
       };
       try {
@@ -1073,6 +1088,28 @@ async function sendDraftReadyTelegram(payload: GenerationPayload) {
   if (!result.ok) {
     const body = await result.text();
     throw new Error(`Telegram sendMessage failed: ${result.status} ${body}`);
+  }
+
+  try {
+    const body = await result.json() as {
+      result?: { message_id?: number; chat?: { id?: number | string } };
+    };
+    const messageId = body.result?.message_id;
+    if (typeof messageId !== "number") {
+      logger.warn({ tweetId: payload.tweet_id }, "Telegram sendMessage response missing message_id");
+      return;
+    }
+
+    await prisma.tweet.update({
+      where: { id: payload.tweet_id },
+      data: {
+        telegram_chat_id: String(body.result?.chat?.id ?? chatId),
+        telegram_message_id: messageId,
+      },
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn({ tweetId: payload.tweet_id, err: message }, "Failed to persist Telegram message metadata");
   }
 }
 

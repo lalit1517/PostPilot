@@ -104,10 +104,11 @@ function coolDownSource(sourceKey: string): void {
   scraperCooldownUntil.set(sourceKey, Date.now() + SCRAPER_COOLDOWN_MS);
 }
 
-async function revertTelegramButtonOnFailure(
+async function updateTelegramFinalButton(
   chatId: string | null,
   messageId: number | null,
   tweetId: string,
+  buttonText: string,
 ): Promise<void> {
   if (!chatId || !messageId) return;
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -115,7 +116,7 @@ async function revertTelegramButtonOnFailure(
 
   const keyboard = {
     inline_keyboard: [
-      [{ text: "↩️ Not Posted (resolution failed)", callback_data: "noop" }],
+      [{ text: buttonText, callback_data: "noop" }],
     ],
   };
 
@@ -127,10 +128,10 @@ async function revertTelegramButtonOnFailure(
     });
     if (!res.ok) {
       const body = await res.text();
-      logger.warn({ tweetId, status: res.status, body }, 'Telegram button revert returned non-OK');
+      logger.warn({ tweetId, status: res.status, body }, 'Telegram final button update returned non-OK');
     }
   } catch (err) {
-    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to revert Telegram button');
+    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to update Telegram final button');
   }
 }
 
@@ -159,7 +160,7 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
     const found = await pollTimelineForFingerprint(username, tweet.fingerprint, expectedDraft, tweet.created_at);
 
     if (found) {
-      await prisma.tweet.update({
+      const confirmedTweet = await prisma.tweet.update({
         where: { id: tweetId },
         data: {
           x_tweet_id: found.tweetId,
@@ -170,6 +171,12 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
         }
       });
       logger.info({ tweetId, foundUrl: found.url }, "Tweet detected and confirmed");
+      await updateTelegramFinalButton(
+        confirmedTweet.telegram_chat_id,
+        confirmedTweet.telegram_message_id,
+        tweetId,
+        "✅ Marked as Posted"
+      );
 
       // First engagement fetch: 10 minutes after POSTED_CONFIRMED
       const firstFetchTime = new Date(Date.now() + 10 * 60 * 1000);
@@ -192,7 +199,12 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
           data: { status: 'RESOLVE_FAILED', posted: false, posted_at: null }
         });
         logger.error({ tweetId }, "Tweet not found after all retries. Marked RESOLVE_FAILED — fingerprint destroyed or tweet never posted.");
-        await revertTelegramButtonOnFailure(failedTweet.telegram_chat_id, failedTweet.telegram_message_id, tweetId);
+        await updateTelegramFinalButton(
+          failedTweet.telegram_chat_id,
+          failedTweet.telegram_message_id,
+          tweetId,
+          "↩️ Not Posted"
+        );
       }
     }
   } catch (error: any) {
