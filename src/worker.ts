@@ -139,7 +139,10 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
   activePolls.add(tweetId);
 
   try {
-    const tweet = await prisma.tweet.findUnique({ where: { id: tweetId } });
+    const tweet = await prisma.tweet.findUnique({
+      where: { id: tweetId },
+      include: { versions: { orderBy: { version: 'desc' }, take: 1 } }
+    });
     if (!tweet) return;
     // Skip if already resolved (live_url set on real Nitter match) or already
     // marked failed. Do NOT skip on `posted=true` alone — the manual `✅ Posted`
@@ -152,7 +155,8 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
 
     logger.info({ tweetId, username, attempt }, "Polling for posted tweet");
 
-    const found = await pollTimelineForFingerprint(username, tweet.fingerprint);
+    const expectedDraft = tweet.versions[0]?.content || "";
+    const found = await pollTimelineForFingerprint(username, tweet.fingerprint, expectedDraft, tweet.created_at);
 
     if (found) {
       await prisma.tweet.update({
@@ -208,7 +212,12 @@ type ScrapeSource = {
   kind: 'nitter' | 'twitter';
 };
 
-async function pollTimelineForFingerprint(username: string, fp: string): Promise<{ tweetId: string, url: string } | null> {
+async function pollTimelineForFingerprint(
+  username: string,
+  fp: string,
+  expectedDraft: string,
+  createdAfter: Date,
+): Promise<{ tweetId: string, url: string } | null> {
   const baseHeaders = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'en-US,en;q=0.9',
@@ -274,7 +283,7 @@ async function pollTimelineForFingerprint(username: string, fp: string): Promise
         continue;
       }
 
-      const result = checkHtmlForFingerprint(text, fp, username);
+      const result = checkHtmlForFingerprint(text, fp, username, expectedDraft, createdAfter);
       if (result) return result;
       noMatchSources.push(source.name);
     } catch (err: any) {
@@ -306,6 +315,64 @@ function normalizeScrapedContent(content: string): string {
     .replace(/\\u200c/gi, '\u200C');
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_m, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_m, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function decodeJsonString(value: string): string {
+  try {
+    return JSON.parse(`"${value.replace(/"/g, '\\"')}"`);
+  } catch {
+    return value
+      .replace(/\\"/g, '"')
+      .replace(/\\n/g, '\n')
+      .replace(/\\t/g, '\t')
+      .replace(/\\\//g, '/');
+  }
+}
+
+function stripInvisible(value: string): string {
+  return value.replace(/[\u200B\u200C]/g, '');
+}
+
+function normalizeVisibleText(value: string): string {
+  return stripInvisible(decodeHtmlEntities(value))
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/[^\p{L}\p{N}%]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function visibleTextMatches(candidateText: string, expectedDraft: string): boolean {
+  const candidate = normalizeVisibleText(candidateText);
+  const expected = normalizeVisibleText(expectedDraft);
+  if (candidate.length < 40 || expected.length < 40) return false;
+
+  const expectedPrefix = expected.slice(0, Math.min(120, expected.length));
+  if (candidate.includes(expectedPrefix) || expected.includes(candidate.slice(0, Math.min(120, candidate.length)))) {
+    return true;
+  }
+
+  const candidateTokens = new Set(candidate.split(' ').filter((token) => token.length > 2));
+  const expectedTokens = new Set(expected.split(' ').filter((token) => token.length > 2));
+  if (candidateTokens.size === 0 || expectedTokens.size === 0) return false;
+
+  let overlap = 0;
+  for (const token of candidateTokens) {
+    if (expectedTokens.has(token)) overlap++;
+  }
+
+  return overlap / Math.min(candidateTokens.size, expectedTokens.size) >= 0.82;
+}
+
 function hexToInvisibleSuffix(fingerprint: string): string {
   const INVISIBLE_MAP: Record<string, string> = { '0': '\u200B', '1': '\u200C' };
   let invisibleSuffix = '';
@@ -332,7 +399,138 @@ function containsFingerprintRun(content: string, fingerprint: string): boolean {
   return false;
 }
 
-function checkHtmlForFingerprint(content: string, fingerprint: string, username: string) {
+function containsTolerantFingerprintRun(content: string, fingerprint: string, expectedDraft: string): boolean {
+  const invisibleRunRegex = /[\u200B\u200C]{28,31}/g;
+  const target = fingerprint.toLowerCase();
+  for (const match of content.matchAll(invisibleRunRegex)) {
+    const run = match[0];
+    const hex = extractFingerprintHex(run);
+    if (!hex || hex.length < 7 || !target.startsWith(hex.toLowerCase())) continue;
+
+    const snippet = content.substring(Math.max(0, match.index - 700), match.index + run.length + 700);
+    if (visibleTextMatches(snippet, expectedDraft)) return true;
+  }
+  return false;
+}
+
+type ScrapedTweetCandidate = {
+  tweetId: string;
+  text: string;
+  createdAt: Date | null;
+};
+
+function parseCandidateDate(value: string | undefined): Date | null {
+  if (!value) return null;
+  const decoded = decodeHtmlEntities(decodeJsonString(value));
+  const parsed = new Date(decoded);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function isRecentCandidate(candidate: ScrapedTweetCandidate, createdAfter: Date): boolean {
+  const candidateTime = candidate.createdAt?.getTime() ?? parseTweetSnowflakeTime(candidate.tweetId);
+  if (candidateTime === null) return false;
+  const lowerBound = createdAfter.getTime() - 10 * 60 * 1000;
+  const upperBound = Date.now() + 10 * 60 * 1000;
+  return candidateTime >= lowerBound && candidateTime <= upperBound;
+}
+
+function parseTweetSnowflakeTime(tweetId: string): number | null {
+  try {
+    const id = BigInt(tweetId);
+    const twitterEpochMs = 1288834974657n;
+    const timestampMs = (id >> 22n) + twitterEpochMs;
+    const asNumber = Number(timestampMs);
+    return Number.isFinite(asNumber) ? asNumber : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractTweetCandidates(content: string, username: string): ScrapedTweetCandidate[] {
+  const candidates = new Map<string, ScrapedTweetCandidate>();
+  const normalized = normalizeScrapedContent(content);
+
+  const xJsonPattern = /"(?:full_text|text)"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,1200}?"id_str"\s*:\s*"(\d+)"[\s\S]{0,1200}?"created_at"\s*:\s*"((?:\\.|[^"\\])*)"/g;
+  for (const match of normalized.matchAll(xJsonPattern)) {
+    const rawText = match[1];
+    const tweetId = match[2];
+    if (!rawText || !tweetId) continue;
+    const text = decodeHtmlEntities(decodeJsonString(rawText));
+    candidates.set(tweetId, {
+      tweetId,
+      text,
+      createdAt: parseCandidateDate(match[3]),
+    });
+  }
+
+  const xJsonDateAfterPattern = /"created_at"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,1200}?"(?:full_text|text)"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,1200}?"id_str"\s*:\s*"(\d+)"/g;
+  for (const match of normalized.matchAll(xJsonDateAfterPattern)) {
+    const rawText = match[2];
+    const tweetId = match[3];
+    if (!rawText || !tweetId) continue;
+    const text = decodeHtmlEntities(decodeJsonString(rawText));
+    candidates.set(tweetId, {
+      tweetId,
+      text,
+      createdAt: parseCandidateDate(match[1]),
+    });
+  }
+
+  const looseTextIdPattern = /"(?:full_text|text)"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,1200}?"id_str"\s*:\s*"(\d+)"/g;
+  for (const match of normalized.matchAll(looseTextIdPattern)) {
+    const rawText = match[1];
+    const tweetId = match[2];
+    if (!rawText || !tweetId || candidates.has(tweetId)) continue;
+    const text = decodeHtmlEntities(decodeJsonString(rawText));
+    const start = match.index ?? 0;
+    const context = normalized.substring(Math.max(0, start - 1200), start + match[0].length + 1200);
+    const createdAtMatch = context.match(/"created_at"\s*:\s*"((?:\\.|[^"\\])*)"/);
+    candidates.set(tweetId, {
+      tweetId,
+      text,
+      createdAt: parseCandidateDate(createdAtMatch?.[1]),
+    });
+  }
+
+  const itemPattern = /<item\b[\s\S]*?<\/item>/gi;
+  for (const itemMatch of normalized.matchAll(itemPattern)) {
+    const item = itemMatch[0];
+    const link = item.match(new RegExp(`https?://[^<"]+/${username}/status/(\\d+)`, 'i'));
+    const title = item.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>|<title>([\s\S]*?)<\/title>/i);
+    if (!link || !title) continue;
+    const pubDate = item.match(/<pubDate>([\s\S]*?)<\/pubDate>/i);
+    const tweetId = link[1];
+    if (!tweetId) continue;
+    candidates.set(tweetId, {
+      tweetId,
+      text: decodeHtmlEntities(title[1] || title[2] || ''),
+      createdAt: parseCandidateDate(pubDate?.[1]),
+    });
+  }
+
+  return [...candidates.values()];
+}
+
+function findVisibleTextCandidate(
+  content: string,
+  username: string,
+  expectedDraft: string,
+  createdAfter: Date,
+): ScrapedTweetCandidate | null {
+  for (const candidate of extractTweetCandidates(content, username)) {
+    if (!isRecentCandidate(candidate, createdAfter)) continue;
+    if (visibleTextMatches(candidate.text, expectedDraft)) return candidate;
+  }
+  return null;
+}
+
+function checkHtmlForFingerprint(
+  content: string,
+  fingerprint: string,
+  username: string,
+  expectedDraft: string,
+  createdAfter: Date,
+) {
     // A primitive check:
     // Since fingerprint zeroes/ones map to \u200B and \u200C, let's rebuild the invisible string to search exactly.
     const normalizedContent = normalizeScrapedContent(content);
@@ -356,6 +554,36 @@ function checkHtmlForFingerprint(content: string, fingerprint: string, username:
                 url: `https://twitter.com/${username}/status/${m[1]}`
             };
         }
+
+        const candidate = findVisibleTextCandidate(normalizedContent, username, expectedDraft, createdAfter);
+        if (candidate) {
+          return {
+            tweetId: candidate.tweetId,
+            url: `https://twitter.com/${username}/status/${candidate.tweetId}`
+          };
+        }
+    }
+
+    if (expectedDraft && containsTolerantFingerprintRun(normalizedContent, fingerprint, expectedDraft)) {
+      const candidate = findVisibleTextCandidate(normalizedContent, username, expectedDraft, createdAfter);
+      if (candidate) {
+        logger.info({ tweetId: candidate.tweetId, fingerprint }, "Resolved tweet via tolerant fingerprint match");
+        return {
+          tweetId: candidate.tweetId,
+          url: `https://twitter.com/${username}/status/${candidate.tweetId}`
+        };
+      }
+    }
+
+    if (expectedDraft) {
+      const candidate = findVisibleTextCandidate(normalizedContent, username, expectedDraft, createdAfter);
+      if (candidate) {
+        logger.info({ tweetId: candidate.tweetId }, "Resolved tweet via visible-text fallback");
+        return {
+          tweetId: candidate.tweetId,
+          url: `https://twitter.com/${username}/status/${candidate.tweetId}`
+        };
+      }
     }
     return null;
 }
