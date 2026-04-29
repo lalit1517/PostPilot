@@ -47,7 +47,7 @@
       },
       "targets": [{
         "datasource": { "type": "grafana-postgresql-datasource", "uid": "__DS_UID__" },
-        "rawSql": "SELECT t.id, t.original_topic, t.edited_topic, CASE WHEN t.edited_topic IS NOT NULL AND t.edited_topic != t.original_topic THEN 1 ELSE 0 END AS topic_edited, t.status, t.time_of_day, t.score, t.posted, t.posted_at, t.live_url, t.fingerprint, t.created_at, CASE WHEN f.cnt > 0 THEN 'Yes' ELSE 'No' END AS has_feedback FROM \"Tweet\" t LEFT JOIN (SELECT tweet_id, COUNT(*) AS cnt FROM \"Feedback\" GROUP BY tweet_id) f ON t.id = f.tweet_id ORDER BY t.created_at DESC",
+        "rawSql": "SELECT t.id, t.original_topic, t.edited_topic, CASE WHEN t.edited_topic IS NOT NULL AND t.edited_topic != t.original_topic THEN 1 ELSE 0 END AS topic_edited, t.status, t.time_of_day, t.scheduled_slot_key, CASE WHEN t.scheduled_slot_key IS NULL THEN 'manual' ELSE 'scheduled' END AS generation_source, t.score, t.posted, t.posted_at, t.live_url, t.fingerprint, t.created_at, CASE WHEN f.cnt > 0 THEN 'Yes' ELSE 'No' END AS has_feedback FROM \"Tweet\" t LEFT JOIN (SELECT tweet_id, COUNT(*) AS cnt FROM \"Feedback\" GROUP BY tweet_id) f ON t.id = f.tweet_id ORDER BY t.created_at DESC",
         "format": "table",
         "refId": "A"
       }]

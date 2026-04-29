@@ -115,11 +115,8 @@ async function triggerManualGeneration(env, slot, topic) {
     ...(topic ? { topic } : {}),
   });
 
-  await warmApp(baseUrl);
-  await sleep(10_000);
-
   let lastError = null;
-  const delays = [0, 10_000, 30_000];
+  const delays = [0, 5_000];
   for (let attempt = 0; attempt < delays.length; attempt += 1) {
     if (delays[attempt] > 0) await sleep(delays[attempt]);
     try {
@@ -177,29 +174,32 @@ async function handleManualRequest(request, env, ctx) {
     return new Response('Invalid slot. Use morning, afternoon, or night.\n', { status: 400 });
   }
 
-  const topic = url.searchParams.get('topic')?.trim() || undefined;
-  ctx.waitUntil(
-    triggerManualGeneration(env, slot, topic)
-      .then(async (response) => {
-        const body = await response.text();
-        console.log('PostPilot manual trigger accepted', {
-          status: response.status,
-          slot,
-          body,
-        });
-      })
-      .catch((err) => {
-        console.error('PostPilot manual trigger failed', err);
-      })
-  );
-
-  return new Response(`Manual ${slot} generation queued.\nCheck Telegram for the draft.\n`, {
-    status: 202,
-    headers: {
-      'content-type': 'text/plain; charset=utf-8',
-      'cache-control': 'no-store',
-    },
-  });
+  try {
+    const topic = url.searchParams.get('topic')?.trim() || undefined;
+    const response = await triggerManualGeneration(env, slot, topic);
+    const body = await response.text();
+    console.log('PostPilot manual trigger accepted', {
+      status: response.status,
+      slot,
+      body,
+    });
+    return new Response(body, {
+      status: response.status,
+      headers: {
+        'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
+  } catch (err) {
+    console.error('PostPilot manual trigger failed', err);
+    return new Response(`Manual trigger failed: ${String(err)}\n`, {
+      status: 502,
+      headers: {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
+  }
 }
 
 export default {
