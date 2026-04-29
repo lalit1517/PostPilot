@@ -25,6 +25,8 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 - [Hard Constraints](#hard-constraints)
 - [Analytics (Grafana)](#analytics-grafana)
 
+<a id="core-innovations"></a>
+
 ## 💡 Core Innovations
 
 
@@ -39,6 +41,8 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 - **Scientific Quality Analysis**: Includes advanced analytics like **Pearson Correlation** tracking between LLM-assigned quality scores and real-world engagement, allowing for data-backed calibration of the agent's intelligence. 📈
 
 
+<a id="tech-stack"></a>
+
 ## 🛠️ Tech Stack
 
 | Layer | Technology |
@@ -52,6 +56,8 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 | Logging | Pino |
 | Infrastructure | Render (Compute) + UptimeRobot (Keep-alive) |
 
+
+<a id="architecture"></a>
 
 ## 🏗️ Architecture
 
@@ -78,6 +84,8 @@ Cloudflare Cron           Telegram (notifications)
 
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution) using due-task scheduling instead of fixed idle polling.
 
+
+<a id="self-learning-pipeline"></a>
 
 ## 🔄 Self-Learning Pipeline
 
@@ -116,6 +124,8 @@ Generation (3 LLM calls max)
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
 | Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
 
+
+<a id="ai-agent-langgraph"></a>
 
 ## 🧠 AI Agent (LangGraph)
 
@@ -170,6 +180,8 @@ Generation (3 LLM calls max)
 
 **Config:** Temperature 0.7, max 2048 output tokens, topP 0.9, 2-minute timeout per call.
 
+
+<a id="background-workers"></a>
 
 ## 👷 Background Workers
 
@@ -299,6 +311,8 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 `reweightFeedback()` runs at 72h completion and via a 6-hour in-memory timestamp gate in the worker. The gate starts at process boot so feedback reweighting does not compete with startup queue discovery.
 
+<a id="api-reference"></a>
+
 ## 🔌 API Reference
 
 | Method | Endpoint | Description |
@@ -322,6 +336,8 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 **Security:** Edit/feedback URLs are signed with HMAC-SHA256 (8-char prefix). Verified via timing-safe comparison.
 
+<a id="database-schema"></a>
+
 ## 🗄️ Database Schema
 
 8 models on PostgreSQL (Supabase), managed by Prisma ORM.
@@ -339,6 +355,8 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 
 
+
+<a id="customizing-the-owner-profile"></a>
 
 ## 👤 Customizing the Owner Profile
 
@@ -378,7 +396,11 @@ In that case, `contentGenerator` calls `pickColdStartTopic(recentTopics, blackli
 
 If the list is empty, the LLM gets a generic "generate a topic from your domains" prompt and rolls the dice. Keeping the list populated prevents the random-content failure mode.
 
+<a id="setup"></a>
+
 ## ⚙️ Setup
+
+<a id="prerequisites"></a>
 
 ### Prerequisites
 
@@ -394,6 +416,8 @@ If the list is empty, the LLM gets a generic "generate a topic from your domains
 
 - Cloudflare account (for free Worker Cron scheduling)
 
+<a id="1-install-dependencies"></a>
+
 ### 1. Install dependencies
 
 
@@ -402,6 +426,8 @@ If the list is empty, the LLM gets a generic "generate a topic from your domains
 npm install
 ```
 
+
+<a id="2-configure-environment"></a>
 
 ### 2. Configure environment
 
@@ -442,7 +468,7 @@ GRAFANA_DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.poo
                                        # Supabase session pooler (port 5432) for Grafana
 ```
 
-Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex):
+Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex). Run this command **separately for each variable** and paste two different values; do not reuse the same secret for both:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
@@ -464,6 +490,8 @@ https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webho
 
 Expect `{"ok":true,"result":true,"description":"Webhook was set"}`. Verify anytime with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`. The `secret_token` is checked on every incoming callback — mismatch returns `403` and the button click is rejected.
 
+<a id="3-set-up-the-database"></a>
+
 ### 3. Set up the database
 
 
@@ -472,6 +500,8 @@ Expect `{"ok":true,"result":true,"description":"Webhook was set"}`. Verify anyti
 npx prisma migrate deploy
 npx prisma generate
 ```
+
+<a id="4-set-up-telegram-bot"></a>
 
 ### 4. Set up Telegram bot
 
@@ -485,6 +515,8 @@ npx prisma generate
 2.  **Get Chat ID**: Message [@userinfobot](https://t.me/userinfobot) and send `/start` to get your numeric Chat ID.
 
 3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` and the numeric Chat ID as `TELEGRAM_CHAT_ID` in your `.env` or Render variables. `TELEGRAM_CHAT_ID` is used for bot-initiated alerts (e.g. `RESOLVE_FAILED`, rate-limit warnings) that originate from the server rather than as a reply to a user message.
+
+<a id="5-configure-cloudflare-worker-cron"></a>
 
 ### 5. Configure Cloudflare Worker Cron
 
@@ -785,6 +817,8 @@ const RPD_LIMIT = 19;     // bump to your tier's RPD
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
 
 
+<a id="database-stability"></a>
+
 ## 🛡️ Database Stability
 
 PostPilot runs in **small-pool mode** (`connection_limit=5`) with **explicit sequential query loading** in `contextLoader` and due-task worker scheduling. The workload is ~3 generations/day, but real overlap still happens when `/api/generate`, worker resolution, Telegram callbacks, status/admin checks, and background agent reads land in the same minute.
@@ -833,6 +867,8 @@ That's `DIRECT_URL` (port 5432, session pooler) during `prisma migrate deploy` a
 3. **If it still fails,** check Supabase dashboard → Project → Settings → Database. Free-tier projects pause after ~7 days idle; hit *Restore* and redeploy.
 
 Runtime is unaffected — `DIRECT_URL` is only used during `prisma migrate deploy` at startup.
+
+<a id="analytics-grafana"></a>
 
 ## 📊 Analytics (Grafana)
 
@@ -900,8 +936,6 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 
    - Add all other keys listed in the [Setup](#setup) section.
 
-> [!TIP]
-
 ### 24/7 Keep-Alive (UptimeRobot)
 
 Render's free tier sleeps after 15 minutes of inactivity. A single monitor keeps it awake:
@@ -917,8 +951,6 @@ Render's free tier sleeps after 15 minutes of inactivity. A single monitor keeps
 > Do **not** add a second monitor against `/health/db` — that endpoint was removed. During cross-region Supavisor flaps it held the single Prisma slot for 45s and made UptimeRobot report the service as DOWN during recoverable blips.
 
 ### Railway (Alternative)
-
-
 
 If you prefer Railway, you can deploy as a single service using `npm start` or as two separate services using `npm start` (API) and `npm run worker` (Worker). Ensure you set both `DATABASE_URL` and `DIRECT_URL`.
 
@@ -936,6 +968,8 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 | `npx prisma migrate dev --name <name>` | Create and apply a new migration |
 | `npx prisma generate` | Regenerate Prisma client types |
 
+<a id="safety--policy-compliance"></a>
+
 ## 🛡️ Safety & Policy Compliance
 
 PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
@@ -947,6 +981,8 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 - **Decoupled Scraping**: Tracking via Nitter + public Syndication API. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
 - **Content Diversity Gate**: Dual-layer check (trigram Jaccard + FORMAT-prefixed structural fingerprint) plus LRU rotation across 8 format archetypes with hard banned-opening lists. Survives Render restarts via heuristic format-map backfill (no schema migration). Protects against shadowbans and same-shape pattern decay.
+
+<a id="hard-constraints"></a>
 
 ## ⚖️ Hard Constraints
 
