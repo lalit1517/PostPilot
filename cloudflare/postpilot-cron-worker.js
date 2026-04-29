@@ -153,7 +153,7 @@ async function triggerManualGeneration(env, slot, topic) {
   throw lastError || new Error('PostPilot manual trigger failed');
 }
 
-async function handleManualRequest(request, env, ctx) {
+async function handleManualRequest(request, env) {
   const url = new URL(request.url);
   const parts = url.pathname.split('/').filter(Boolean);
   const [, token, slot] = parts;
@@ -211,7 +211,7 @@ export default {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith('/manual/')) {
-        return await handleManualRequest(request, env, ctx);
+        return await handleManualRequest(request, env);
       }
 
       return new Response('PostPilot cron worker is active.\n', {

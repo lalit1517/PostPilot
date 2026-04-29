@@ -56,7 +56,7 @@ model Feedback {
 
 model RetryQueue {
   id          String   @id @default(uuid())
-  task_type   String   // e.g., "POST_TO_X", "SEND_EMAIL"
+  task_type   String   // RESOLVE_TWEET, FETCH_ENGAGEMENT, EVOLVE_PERSONA
   payload     Json     // Payload of the task
   attempts    Int      @default(0)
   max_retries Int      @default(3)
