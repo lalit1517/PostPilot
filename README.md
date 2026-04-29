@@ -114,7 +114,7 @@ Generation (3 LLM calls max)
 | Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 38 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
 
 
 ## 🧠 AI Agent (LangGraph)
@@ -774,12 +774,12 @@ Do not point UptimeRobot at `/api/cron/generate`, `/api/generate`, or any databa
 
 ### Increasing RPM / RPD Limits
 
-Defaults are set in [`src/rateGuard.ts`](src/rateGuard.ts) and must match your active Google AI tier/model quota. Current app-side settings are 5 RPM / 38 RPD:
+Defaults are set in [`src/rateGuard.ts`](src/rateGuard.ts) and must match your active Google AI tier/model quota. Current app-side settings are 5 RPM / 19 RPD:
 
 ```typescript
 // src/rateGuard.ts
 const RPM_LIMIT = 5;      // bump to your tier's RPM
-const RPD_LIMIT = 38;     // bump to your tier's RPD
+const RPD_LIMIT = 19;     // bump to your tier's RPD
 ```
 
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
@@ -954,7 +954,7 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
-- **Google AI Studio limits:** current app-side guard is 5 RPM / 38 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
+- **Google AI Studio limits:** current app-side guard is 5 RPM / 19 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
 
 - **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
 
