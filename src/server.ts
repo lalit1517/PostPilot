@@ -16,7 +16,7 @@ import {
   getTopicPerformance,
   getQualityOutcomeCorrelation,
 } from "./analytics.js";
-import { runWorker, enqueueRetry } from "./worker.js";
+import { runWorker, enqueueResolveTweetIfNeeded } from "./worker.js";
 
 const app = express();
 app.set("trust proxy", 1); // Trust Render's proxy to get the correct user IP and protocol
@@ -158,6 +158,28 @@ function generateToken(id: string) {
 
 function escapeHTML(str: string) {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildDraftTelegramText(payload: {
+  topic: string;
+  draft: string;
+  time_of_day: string;
+  score: number;
+  statusLine?: string;
+}) {
+  return [
+    `<b>New X Post Draft</b>`,
+    "",
+    `<b>Topic:</b> ${escapeHTML(payload.topic)}`,
+    "",
+    "<b>Draft:</b>",
+    `<pre><code>${escapeHTML(payload.draft)}</code></pre>`,
+    "",
+    `<b>Time:</b> ${escapeHTML(payload.time_of_day)}`,
+    `<b>Score:</b> ${payload.score || 0}/10`,
+    ...(payload.statusLine ? ["", `<b>Status:</b> ${escapeHTML(payload.statusLine)}`] : []),
+    "",
+  ].join("\n");
 }
 
 const SCHEDULED_SLOTS = ["morning", "afternoon", "night"] as const;
@@ -913,25 +935,32 @@ app.post("/api/telegram/webhook", async (req, res) => {
       const username = process.env.X_USERNAME;
       const processAfter = new Date(Date.now() + 10 * 60 * 1000);
       try {
-        await enqueueRetry(
-          "RESOLVE_TWEET",
+        const queued = await enqueueResolveTweetIfNeeded(
           { tweetId, username },
-          1,
           processAfter,
         );
         logger.info(
-          { tweetId, username, processAfter },
-          "Manual confirmation. Queued detector.",
+          { tweetId, username, processAfter, queued: queued.created },
+          queued.created
+            ? "Manual confirmation. Queued detector."
+            : "Manual confirmation. Detector already queued.",
         );
       } catch (e) {
         logger.error("Failed to enqueue resolution");
       }
 
-      // Manual confirmation is optimistic; keep actions visible until resolver
-      // confirms success/failure and replaces this with a final inert button.
+      // Manual confirmation is optimistic. Keep URL actions visible, but remove
+      // the Posted callback row so repeated taps cannot hit the webhook.
       const messageId = callback_query.message.message_id;
       const baseUrl = process.env.BASE_URL || "";
       const postedToken = generateToken(tweetId);
+      const updatedText = buildDraftTelegramText({
+        topic: tweet.edited_topic || tweet.original_topic,
+        draft: tweet.versions[0]?.content || "",
+        time_of_day: tweet.time_of_day,
+        score: tweet.score,
+        statusLine: "☑️ Post Confirmed - resolver running",
+      });
       const updatedKeyboard = {
         inline_keyboard: [
           [
@@ -952,18 +981,19 @@ app.post("/api/telegram/webhook", async (req, res) => {
               url: `${baseUrl}/api/view-feedback?id=${tweetId}&token=${postedToken}`,
             },
           ],
-          [{ text: "☑️ Post Confirmed", callback_data: "noop" }],
         ],
       };
       try {
         const editRes = await fetch(
-          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup`,
+          `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/editMessageText`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               chat_id: chatId,
               message_id: messageId,
+              text: updatedText,
+              parse_mode: "HTML",
               reply_markup: updatedKeyboard,
             }),
           },
@@ -972,13 +1002,13 @@ app.post("/api/telegram/webhook", async (req, res) => {
           const errBody = await editRes.text();
           logger.warn(
             { status: editRes.status, body: errBody },
-            "Telegram editMessageReplyMarkup returned non-OK",
+            "Telegram editMessageText returned non-OK",
           );
         }
       } catch (err) {
         logger.warn(
           { err: (err as Error).message },
-          "Failed to edit Telegram message markup",
+          "Failed to edit Telegram message text",
         );
       }
     } else if (action === "ct" || action === "copy_tweet") {
@@ -1029,18 +1059,12 @@ async function sendDraftReadyTelegram(payload: GenerationPayload) {
     return;
   }
 
-  const text = [
-    `<b>New X Post Draft</b>`,
-    "",
-    `<b>Topic:</b> ${escapeHTML(payload.topic)}`,
-    "",
-    "<b>Draft:</b>",
-    `<pre><code>${payload.htmlDraft}</code></pre>`,
-    "",
-    `<b>Time:</b> ${escapeHTML(payload.time_of_day)}`,
-    `<b>Score:</b> ${payload.score || 0}/10`,
-    "",
-  ].join("\n");
+  const text = buildDraftTelegramText({
+    topic: payload.topic,
+    draft: payload.draft,
+    time_of_day: payload.time_of_day,
+    score: payload.score,
+  });
 
   const replyMarkup = {
     inline_keyboard: [
@@ -1274,15 +1298,15 @@ app.get("/api/post-intent", async (req, res) => {
     const user = String(username);
 
     const processAfter = new Date(Date.now() + 10 * 60 * 1000);
-    await enqueueRetry(
-      "RESOLVE_TWEET",
+    const queued = await enqueueResolveTweetIfNeeded(
       { tweetId, username: user },
-      1,
       processAfter,
     );
     logger.info(
-      { tweetId, username: user, processAfter },
-      "Intercepted post intent. Queued detection polling.",
+      { tweetId, username: user, processAfter, queued: queued.created },
+      queued.created
+        ? "Intercepted post intent. Queued detection polling."
+        : "Intercepted post intent. Detection polling already queued.",
     );
   } catch (err: any) {
     logger.error({ err: err.message }, "Error enqueuing resolution task");

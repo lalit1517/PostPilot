@@ -104,34 +104,60 @@ function coolDownSource(sourceKey: string): void {
   scraperCooldownUntil.set(sourceKey, Date.now() + SCRAPER_COOLDOWN_MS);
 }
 
-async function updateTelegramFinalButton(
+function escapeHTML(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildDraftTelegramText(tweet: {
+  original_topic: string;
+  edited_topic: string | null;
+  time_of_day: string;
+  score: number;
+}, draft: string, statusLine: string): string {
+  return [
+    '<b>New X Post Draft</b>',
+    '',
+    `<b>Topic:</b> ${escapeHTML(tweet.edited_topic || tweet.original_topic)}`,
+    '',
+    '<b>Draft:</b>',
+    `<pre><code>${escapeHTML(draft)}</code></pre>`,
+    '',
+    `<b>Time:</b> ${escapeHTML(tweet.time_of_day)}`,
+    `<b>Score:</b> ${tweet.score || 0}/10`,
+    '',
+    `<b>Status:</b> ${escapeHTML(statusLine)}`,
+    '',
+  ].join('\n');
+}
+
+async function updateTelegramFinalStatus(
   chatId: string | null,
   messageId: number | null,
   tweetId: string,
-  buttonText: string,
+  text: string,
 ): Promise<void> {
   if (!chatId || !messageId) return;
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
 
-  const keyboard = {
-    inline_keyboard: [
-      [{ text: buttonText, callback_data: "noop" }],
-    ],
-  };
-
   try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageReplyMarkup`, {
+    const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: messageId, reply_markup: keyboard }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [] },
+      }),
     });
     if (!res.ok) {
       const body = await res.text();
-      logger.warn({ tweetId, status: res.status, body }, 'Telegram final button update returned non-OK');
+      logger.warn({ tweetId, status: res.status, body }, 'Telegram final status update returned non-OK');
     }
   } catch (err) {
-    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to update Telegram final button');
+    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to update Telegram final status');
   }
 }
 
@@ -171,11 +197,11 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
         }
       });
       logger.info({ tweetId, foundUrl: found.url }, "Tweet detected and confirmed");
-      await updateTelegramFinalButton(
+      await updateTelegramFinalStatus(
         confirmedTweet.telegram_chat_id,
         confirmedTweet.telegram_message_id,
         tweetId,
-        "✅ Marked as Posted"
+        buildDraftTelegramText(tweet, expectedDraft, "✅ Marked as Posted")
       );
 
       // First engagement fetch: 10 minutes after POSTED_CONFIRMED
@@ -199,11 +225,11 @@ export async function resolveTweetAfterPost(tweetId: string, username: string, a
           data: { status: 'RESOLVE_FAILED', posted: false, posted_at: null }
         });
         logger.error({ tweetId }, "Tweet not found after all retries. Marked RESOLVE_FAILED — fingerprint destroyed or tweet never posted.");
-        await updateTelegramFinalButton(
+        await updateTelegramFinalStatus(
           failedTweet.telegram_chat_id,
           failedTweet.telegram_message_id,
           tweetId,
-          "↩️ Not Posted"
+          buildDraftTelegramText(tweet, expectedDraft, "↩️ Not Posted")
         );
       }
     }
@@ -600,6 +626,12 @@ function checkHtmlForFingerprint(
     return null;
 }
 
+function retryPayloadTweetId(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  const tweetId = (payload as { tweetId?: unknown }).tweetId;
+  return typeof tweetId === 'string' ? tweetId : null;
+}
+
 export async function enqueueRetry(taskType: string, payload: any, attempt: number, processAfter?: Date, maxRetries: number = 5) {
   const task = await prisma.retryQueue.create({
     data: {
@@ -614,6 +646,41 @@ export async function enqueueRetry(taskType: string, payload: any, attempt: numb
   if (workerStarted) {
     scheduleWorkerTick(getDelayUntil(task.process_after));
   }
+
+  return task;
+}
+
+export async function enqueueResolveTweetIfNeeded(
+  payload: { tweetId: string; username?: string | undefined },
+  processAfter: Date,
+) {
+  const pendingResolveTasks = await prisma.retryQueue.findMany({
+    where: {
+      task_type: 'RESOLVE_TWEET',
+      status: 'PENDING',
+    },
+    select: {
+      id: true,
+      payload: true,
+      attempts: true,
+      process_after: true,
+    },
+    orderBy: [{ process_after: 'asc' }, { created_at: 'asc' }],
+  });
+
+  const existing = pendingResolveTasks.find(
+    (task) => retryPayloadTweetId(task.payload) === payload.tweetId,
+  );
+
+  if (existing) {
+    if (workerStarted) {
+      scheduleWorkerTick(getDelayUntil(existing.process_after));
+    }
+    return { created: false, task: existing };
+  }
+
+  const task = await enqueueRetry('RESOLVE_TWEET', payload, 1, processAfter);
+  return { created: true, task };
 }
 
 // Track last reweight time in-memory (6h gate). Start the clock at boot so

@@ -195,13 +195,13 @@ When a draft arrives in Telegram, you get four buttons. Here's exactly what each
 
 **🚀 Open in X** — the primary posting path. Tapping it:
 
-1. Hits `/api/post-intent` on the server (logs the click, enqueues `RESOLVE_TWEET` with a 10-min delay)
+1. Hits `/api/post-intent` on the server (logs the click, idempotently enqueues `RESOLVE_TWEET` with a 10-min delay; repeated clicks reuse the existing pending resolver task)
 
 2. Redirects your browser to X's compose box, pre-filled with the draft + invisible fingerprint
 
 3. You post it manually on X
 
-4. 10 minutes later, `RESOLVE_TWEET` fires automatically. On success, it marks the tweet `POSTED_CONFIRMED`, replaces the Telegram keyboard with a single inert **"✅ Marked as Posted"** button, and starts engagement tracking.
+4. 10 minutes later, `RESOLVE_TWEET` fires automatically. On success, it marks the tweet `POSTED_CONFIRMED`, edits the Telegram message text to show `Status: ✅ Marked as Posted`, removes callback buttons, and starts engagement tracking.
 
 PostPilot stores the Telegram `chat_id` + `message_id` as soon as the draft message is sent, because URL buttons do not send callback metadata when tapped. That stored message reference is what lets the worker update the original Telegram message after automatic resolution.
 
@@ -214,14 +214,14 @@ PostPilot stores the Telegram `chat_id` + `message_id` as soon as the draft mess
 
 - You posted but the auto-detection silently failed
 
-Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, enqueues `RESOLVE_TWEET`, persists the Telegram `chat_id` + `message_id` on the Tweet row, and changes the button row to **"☑️ Post Confirmed"** while keeping **Open in X**, **Edit Topic**, and **Feedback** visible. This is an optimistic user confirmation, not final resolver proof.
+Tapping it immediately sets `posted=true`, `status=POSTED_CONFIRMED`, idempotently enqueues `RESOLVE_TWEET`, persists the Telegram `chat_id` + `message_id` on the Tweet row, edits the Telegram message text to show `Status: ☑️ Post Confirmed - resolver running`, and removes the **Posted** callback row while keeping **Open in X**, **Edit Topic**, and **Feedback** visible. Repeated clicks reuse the existing pending resolver task. This is an optimistic user confirmation, not final resolver proof.
 
 If `RESOLVE_TWEET` still finds nothing after all retries (~62 min total: 10 min initial delay + ~7 min short retry + ~45 min final retry), the worker:
 
 1. Marks the tweet `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null`.
-2. Edits the original Telegram message via `editMessageReplyMarkup`, replacing the full keyboard with one inert **"↩️ Not Posted"** button.
+2. Edits the original Telegram message via `editMessageText`, showing `Status: ↩️ Not Posted` and removing the keyboard so no final-state callback can be tapped.
 
-If the resolver finds the tweet, it replaces the full keyboard with one inert **"✅ Marked as Posted"** button. Final buttons use `callback_data: "noop"` and only answer Telegram's callback spinner; they do not write to the database or enqueue more work.
+If the resolver finds the tweet, it shows `Status: ✅ Marked as Posted` and removes callback buttons. Telegram inline buttons with `callback_data` always send a webhook POST when tapped, so final status is represented in message text rather than a fake disabled button.
 
 > The worker resolution guard skips on `live_url` set or `status === 'RESOLVE_FAILED'` — NOT on `posted=true`. The manual click sets `posted=true` optimistically; gating on it would silently drop every manual-confirm task before it polls. Earlier versions had this bug — the button never changed back even after hours.
 
@@ -233,7 +233,7 @@ This covers two common cases: you clicked ✅ Posted but never actually posted, 
 **✏️ Edit Topic / 💬 Feedback** — open secure HMAC-signed web forms. Submit triggers a full regeneration with the new topic or feedback injected into the pipeline.
 
 
-There is no final "undo" action on **Marked as Posted** or **Not Posted**. Those buttons are intentionally inert final-state indicators; corrections should be handled in the database or by generating a new draft.
+There is no final Telegram "undo" action after resolver success or failure. Corrections should be handled in the database or by generating a new draft.
 
 ### RESOLVE_TWEET
 
@@ -251,9 +251,9 @@ Detects posted tweets via a layered resolver: exact invisible fingerprint match 
 
 5. Fallback match: extracts same-author tweet candidates from X/Nitter responses and compares normalized visible text against the stored `TweetVersion.content`. Candidates must be recent; when `created_at` is missing, the worker derives the timestamp from the X snowflake ID.
 
-6. On match: marks tweet as `POSTED_CONFIRMED`, updates the Telegram message to the final **"✅ Marked as Posted"** button, and schedules the first engagement fetch.
+6. On match: marks tweet as `POSTED_CONFIRMED`, updates the Telegram message text to `Status: ✅ Marked as Posted`, removes callback buttons, and schedules the first engagement fetch.
 
-7. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED`, resets `posted=false`, `posted_at=null`, and updates the Telegram message to the final **"↩️ Not Posted"** button — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+7. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED`, resets `posted=false`, `posted_at=null`, updates the Telegram message text to `Status: ↩️ Not Posted`, and removes callback buttons — prevents the tweet from silently appearing as posted when it wasn't confirmed.
 
 **Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit visible text, but changing the final text heavily can weaken the visible-text fallback. The resolver can tolerate some trailing zero-width truncation, but deleting through the invisible suffix, select-all retyping, or posting a substantially different draft can still force `RESOLVE_FAILED`.
 
@@ -345,7 +345,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 | Model | Purpose |
 | :--- | :--- |
-| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted when the draft is sent to Telegram, and refreshed on manual ✅ Posted clicks, so the worker can replace the original message with final "✅ Marked as Posted" or "↩️ Not Posted" state) |
+| `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted when the draft is sent to Telegram, and refreshed on manual ✅ Posted clicks, so the worker can edit the original message with final `Status: ✅ Marked as Posted` or `Status: ↩️ Not Posted` text) |
 | `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
