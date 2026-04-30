@@ -551,7 +551,7 @@ cd /path/to/PostPilot/cloudflare
 cp wrangler.toml.example wrangler.toml
 ```
 
-`cloudflare/wrangler.toml` is local deploy config. Keep it untracked; commit `cloudflare/wrangler.toml.example` instead.
+`cloudflare/wrangler.toml` is local deploy config. Keep it untracked; commit `cloudflare/wrangler.toml.example` instead. Because this Worker is deployed with Wrangler, treat `cloudflare/wrangler.toml` as the source of truth for the real deployed schedule and observability settings; dashboard changes should be copied back into `wrangler.toml` and `wrangler.toml.example` before the next deploy.
 
 Log in to Cloudflare.
 
@@ -725,7 +725,31 @@ Manual calls intentionally use `/api/generate`, so every click creates a new dra
 
 #### Logs and debugging
 
-Tail Worker logs:
+Workers Logs are enabled in `cloudflare/wrangler.toml` and `cloudflare/wrangler.toml.example`:
+
+```toml
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+```
+
+After deploy, you can inspect persisted Worker logs in the Cloudflare dashboard:
+
+```text
+Workers & Pages -> postpilot-cron -> Observability
+```
+
+For live debugging, use the dashboard live logs view:
+
+```text
+Workers & Pages -> postpilot-cron -> Logs -> Live
+```
+
+or stream the same Worker with Wrangler:
 
 Windows PowerShell:
 
@@ -739,6 +763,20 @@ macOS/Linux:
 npx wrangler tail
 ```
 
+To confirm whether a scheduled cron actually fired, use Cloudflare's cron event history:
+
+```text
+Workers & Pages -> postpilot-cron -> Settings -> Trigger Events -> View events
+```
+
+Cron Events should show invocations for:
+
+```text
+30 3 * * *
+0 8 * * *
+30 16 * * *
+```
+
 Useful log lines:
 
 ```text
@@ -748,6 +786,8 @@ PostPilot manual trigger failed
 ```
 
 If a manual trigger returns `Unauthorized`, your URL token does not match `POSTPILOT_MANUAL_TRIGGER_TOKEN`. If the Worker logs `HTTP 401`, `POSTPILOT_INTERNAL_API_KEY` does not match Render's `INTERNAL_API_KEY`.
+
+Do not manage the production schedule only from the Cloudflare dashboard. Wrangler deploys replace the active Worker configuration with the local `cloudflare/wrangler.toml` settings, so schedule, observability, and route changes must live in `wrangler.toml` first, then be mirrored into `wrangler.toml.example` for future setup safety.
 
 #### Changing schedule or timezone
 
@@ -761,16 +801,20 @@ For IST, subtract 5 hours 30 minutes:
 22:00 IST -> 16:30 UTC -> 30 16 * * *
 ```
 
-Update two files when changing the schedule:
+Update these files when changing the schedule:
 
-1. `cloudflare/wrangler.toml` or `cloudflare/wrangler.toml.example`
+1. `cloudflare/wrangler.toml`
 
 ```toml
 [triggers]
 crons = ["30 3 * * *", "0 8 * * *", "30 16 * * *"]
 ```
 
-2. `cloudflare/postpilot-cron-worker.js`
+2. `cloudflare/wrangler.toml.example`
+
+Keep the same `[triggers]` schedule in the committed example so future local setup does not drop a slot.
+
+3. `cloudflare/postpilot-cron-worker.js`
 
 ```js
 const SCHEDULE_TO_SLOT = {
