@@ -328,7 +328,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | `GET` | `/api/view-feedback?id=&token=` | HTML form for feedback submission |
 | `POST` | `/api/edit` | Update topic + trigger regeneration |
 | `POST` | `/api/feedback` | Submit feedback + trigger regeneration |
-| `POST` | `/api/telegram/webhook` | Telegram bot callback handler (posted confirmation and inert final-state buttons) |
+| `POST` | `/api/telegram/webhook` | Telegram bot callback handler for active buttons such as manual posted confirmation |
 | `GET` | `/api/admin/rate-status` | Current RPM/RPD consumption and remaining budget from `LlmCallLog` |
 | `GET` | `/api/admin/failed-tasks?limit=N` | Dead letter queue — inspect `RetryQueue` rows with `status = FAILED` |
 | `GET` | `/api/admin/engagement-pattern` | Aggregates `TweetOutcome` by `time_of_day`, `day_of_week`, and the time × day pivot |
@@ -483,7 +483,7 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 `INTERNAL_API_KEY` is required in the `X-API-Key` header for `/api/generate`, `/api/cron/generate`, `/api/status`, `/api/analytics`, `/api/status/:id/timeline`, and `/api/admin/*` requests.
 
-**Register the Telegram webhook** — without this, button clicks such as ✅ Posted and final-state no-op acknowledgements never reach the server and Telegram buttons can appear stuck. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
+**Register the Telegram webhook** — without this, active callback buttons such as ✅ Posted never reach the server and Telegram buttons can appear stuck. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
 
 ```
 https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
