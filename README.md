@@ -24,6 +24,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 - [Safety & Policy Compliance](#safety--policy-compliance)
 - [Hard Constraints](#hard-constraints)
 - [Analytics (Grafana)](#analytics-grafana)
+- [Contributing](#contributing)
 
 <a id="core-innovations"></a>
 
@@ -1065,4 +1066,12 @@ PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk 
 
 - **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → coherenceGate → [autoRefiner if score<8 OR coherence failed] → finalTopicMemory → END`. Re-roll edge: `diversityGate → personaAdapter → contentGenerator` (capped at 1; new format archetype + rejected fingerprint injected into the retry prompt). The route back is keyed to active `rejectedFingerprint` state, not `rerollCount` alone, so a passed re-roll cannot loop and burn the 5 RPM budget.
 
+<a id="contributing"></a>
 
+## Contributing
+
+Contributions, feature ideas, and bug reports are welcome. Open an issue for bugs, setup friction, feature requests, or questions about the automation flow. For bug reports, include the command or endpoint you ran, expected vs actual behavior, and any safe-to-share logs or screenshots.
+
+If you want to build a feature, please open an issue first so the approach can stay aligned with PostPilot's safety, rate-limit, and human-in-the-loop posting model.
+
+If PostPilot is useful to you, please star the repo so more builders can find it. ⭐
