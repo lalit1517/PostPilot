@@ -8,5 +8,8 @@ build
 cloudflare/.wrangler/
 cloudflare/wrangler.toml
 scratch/
+ownerProfile.private.json
+src/config/ownerProfile.local.json
+src/config/ownerProfile.private.json
 AGENTS.md
 CONTEXT.md

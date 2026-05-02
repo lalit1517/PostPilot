@@ -147,7 +147,7 @@ Generation (3 LLM calls max)
 | `finalTopicMemory` | No | Records the final accepted topic into the 48h in-memory cooldown after either the direct high-score path or the `autoRefiner` path. This prevents refiner-produced drafts from skipping topic memory and repeating yesterday's topic today. |
 
 
-**Owner Identity (`OWNER_PROFILE`)**: **Single source of truth at [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts)**. Every file that needs owner context imports from there. No env-var overrides by design — one file, one source, zero ambiguity. `.env` is only for secrets + infra. To clone PostPilot for a different persona: edit this file, commit, deploy. See [Customizing the Owner Profile](#customizing-the-owner-profile) for the per-field guide.
+**Owner Identity (`OWNER_PROFILE`)**: **Single runtime contract at [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts)**. The repo ships a public-safe [`ownerProfile.example.json`](ownerProfile.example.json). Runtime loads `ownerProfile.private.json` first; if it is missing, it falls back to the example profile. Upload the private file to Render as a Secret File so personal persona data is not committed to GitHub. See [Customizing the Owner Profile](#customizing-the-owner-profile) for setup.
 
 **Draft safety helpers** (pure computation, zero extra LLM calls):
 
@@ -361,7 +361,28 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 
 ## 👤 Customizing the Owner Profile
 
-All persona configuration lives in **one file**: [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts). Edit the fields, commit, deploy. There are no env-var overrides for these values by design — one file, one source, zero ambiguity. `.env` stays for secrets and infra only (DB URL, API keys, Telegram token).
+The public repo ships with a safe example profile in [`ownerProfile.example.json`](ownerProfile.example.json). Do not put personal values in that tracked file.
+
+Runtime priority is simple:
+
+1. Load Render Secret File path `/etc/secrets/ownerProfile.private.json`.
+2. Load local private profile from `ownerProfile.private.json`.
+3. If no private profile exists, fall back to `ownerProfile.example.json`.
+
+Local setup:
+
+```powershell
+Copy-Item ownerProfile.example.json ownerProfile.private.json
+```
+
+Then edit `ownerProfile.private.json` with your real username, identity, domains, voice, and cold-start topics. This file is ignored by Git.
+
+On Render, the recommended setup is a **Secret File**:
+
+1. Open the Render service -> **Environment** -> **Secret Files**.
+2. Add a file named `ownerProfile.private.json`.
+3. Paste the contents of your local `ownerProfile.private.json`.
+4. Save and deploy. Render exposes it at `/etc/secrets/ownerProfile.private.json`.
 
 | Field | Used by | What it does |
 | :--- | :--- | :--- |
@@ -373,7 +394,7 @@ All persona configuration lives in **one file**: [`src/config/ownerProfile.ts`](
 | `experienceVoice` | persona prompt | One-line experience anchor. |
 | `cities` / `hobbies` / `slangs` | persona prompt | Personality flavor. Slangs are sparingly applied (1 per tweet max). |
 | `avoid` | persona prompt | Hard topic bans. The agent never tweets about these. |
-| `voiceSeed` | `personaEvolver.ts` | Voice anchor used when the LLM evolves the persona — replaces the old hardcoded "GenZ Indian dev" string. |
+| `voiceSeed` | `personaEvolver.ts` | Voice anchor used when the LLM evolves the persona, so the profile can be supplied by the runtime owner configuration instead of a hardcoded voice. |
 | `preferredLength` | length target seed | `'short' \| 'medium' \| 'long'`. Soft hint until enough outcome data exists for `computeLengthTarget()` to derive a real range. |
 | `tweetLanguages` | `trendRelevance.ts` | ISO 639-1 codes. When `'en'` is in the list, non-ASCII trends are dropped (the fix for the Turkish-holiday-passes-as-relevant bug). |
 | `coldStartTopics` | `contentGenerator` cold-start fallback | See below. |
@@ -432,7 +453,7 @@ npm install
 
 ### 2. Configure environment
 
-> **Persona configuration lives in [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts), NOT in `.env`.** See [Customizing the Owner Profile](#customizing-the-owner-profile). `.env` is only for secrets and infra.
+> **The committed owner profile is a public example.** Copy `ownerProfile.example.json` to ignored `ownerProfile.private.json` for local use, and upload that private file to Render. See [Customizing the Owner Profile](#customizing-the-owner-profile).
 
 Create `.env` in the project root (use `.env.example` as a template):
 
@@ -452,6 +473,7 @@ DIRECT_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.pooler.supaba
 GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/app/apikey
                                        # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
+                                       # Must match username in the runtime owner profile.
 NITTER_INSTANCES=nitter.net,xcancel.com,nitter.privacyredirect.com,nitter.privacydev.net,nitter.poast.org,nitter.space,nitter.tiekoetter.com,lightbrd.com
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
