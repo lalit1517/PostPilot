@@ -1,5 +1,11 @@
-// Owner identity — THE single place to configure persona/domains/voice.
-// Edit this file, commit, deploy. No env-var overrides by design.
+// Owner profile loader.
+//
+// Priority:
+// 1. Render Secret File (/etc/secrets/ownerProfile.private.json)
+// 2. Local private profile JSON (ownerProfile.private.json)
+// 3. Public example profile JSON (ownerProfile.example.json)
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 type PreferredLength = 'short' | 'medium' | 'long';
 
@@ -22,120 +28,101 @@ export interface OwnerProfileShape {
   coldStartTopics: string[];
 }
 
-export const OWNER_PROFILE: OwnerProfileShape = {
-  // X/Twitter handle (without @).
-  username: 'lalit_notFound',
+const ROOT_DIR = process.cwd();
+const LOCAL_PRIVATE_PROFILE = join(ROOT_DIR, 'ownerProfile.private.json');
+const LOCAL_EXAMPLE_PROFILE = join(ROOT_DIR, 'ownerProfile.example.json');
+const RENDER_PRIVATE_PROFILE = '/etc/secrets/ownerProfile.private.json';
 
-  // One-line identity — feeds the persona prompt directly.
-  identity:
-    'Lalit Kumar, 23-year-old FullStack AI Engineer, 2 years of real shipping experience. GenZ dev. Not a tutorial guy.',
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
-  // High-level domain descriptions — used in the persona prompt.
-  domains: [
-    'AI/LLM — agents, LangGraph, RAG, prompt engineering, Gemini, OpenAI, Anthropic',
-    'Frontend — React, Next.js, TypeScript, Tailwind, UI/UX, component design',
-    'FullStack — Node.js, APIs, Prisma, Supabase, PostgreSQL, system design',
-    'Dev culture — shipping, indie hacking, build-in-public, side projects, developer productivity',
-    'Sarcasm/humor — tech hype, over-engineering, tutorial hell, AI bros, imposter syndrome, bad code reviews',
-  ],
+function requireString(value: unknown, field: keyof OwnerProfileShape, source: string): string {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`Invalid owner profile in ${source}: ${field} must be a non-empty string`);
+  }
 
-  // Flat lowercase keyword list — used by the trend relevance filter and the
-  // topic coherence gate. Add broadly; the filter uses word-boundary matches
-  // so "ai" won't trigger on "brain".
-  domainKeywords: [
-    'ai', 'llm', 'gpt', 'claude', 'gemini', 'openai', 'anthropic', 'agent', 'agents',
-    'rag', 'prompt', 'model', 'ml', 'machine learning', 'embedding', 'vector',
-    'react', 'nextjs', 'next.js', 'typescript', 'javascript', 'js', 'ts',
-    'frontend', 'backend', 'fullstack', 'full stack', 'tailwind', 'css', 'ui', 'ux', 'component',
-    'node', 'nodejs', 'api', 'rest', 'graphql', 'database', 'db', 'sql', 'postgres', 'prisma', 'supabase',
-    'deployment', 'deploy', 'render', 'vercel', 'railway', 'devops',
-    'startup', 'saas', 'product', 'indie', 'ship', 'shipping', 'side project',
-    'tech', 'devtools', 'open source', 'oss', 'github', 'cursor', 'vscode', 'code', 'coding',
-    'dev', 'developer', 'developers', 'programming', 'software', 'engineer', 'engineering',
-    'debug', 'debugging', 'bug', 'refactor', 'architecture',
-  ],
+  return value;
+}
 
-  // Moods — one is sampled per generation to vary tone.
-  moods: [
-    'curious and caffeinated',
-    'frustrated-but-still-shipping',
-    'late-night-coder energy',
-    'quietly proud after a bug fix',
-    'mildly unhinged about a new AI tool',
-    'done with hype, just building',
-  ],
+function requireStringArray(value: unknown, field: keyof OwnerProfileShape, source: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || item.trim() === '')) {
+    throw new Error(`Invalid owner profile in ${source}: ${field} must be a non-empty string array`);
+  }
 
-  // Voice/tone style items.
-  tones: [
-    'punchy and direct',
-    'dry humor with a straight face',
-    'self-aware and slightly self-deprecating',
-    'opinionated but not arrogant',
-    'GenZ brevity — says a lot in few words',
-  ],
+  return value;
+}
 
-  // Language rules.
-  language: [
-    'Plain English by default',
-    'No jargon without payoff — earn the technical term',
-    'Short sentences. No filler. No corporate speak.',
-  ],
+function requirePreferredLength(value: unknown, source: string): PreferredLength {
+  if (value !== 'short' && value !== 'medium' && value !== 'long') {
+    throw new Error(`Invalid owner profile in ${source}: preferredLength must be short, medium, or long`);
+  }
 
-  // One-line experience statement.
-  experienceVoice:
-    '2 years in, knows enough to be dangerous. Has opinions. Has scars from prod bugs. Not pretending to be a 10x guru.',
+  return value;
+}
 
-  // Cities the owner vibes with (flavor only).
-  cities: ['Jaipur', 'Bangalore', 'Delhi'],
+function validateOwnerProfile(value: unknown, source: string): OwnerProfileShape {
+  if (!isRecord(value)) {
+    throw new Error(`Invalid owner profile in ${source}: expected a JSON object`);
+  }
 
-  // Hobbies / personality flavor.
-  hobbies: [
-    'building side projects at 2am',
-    'trying every new AI tool that drops',
-    'chai',
-    'doom-scrolling dev Twitter then building something inspired by it',
-    "debugging things that 'should just work'",
-  ],
+  return {
+    username: requireString(value.username, 'username', source),
+    identity: requireString(value.identity, 'identity', source),
+    domains: requireStringArray(value.domains, 'domains', source),
+    domainKeywords: requireStringArray(value.domainKeywords, 'domainKeywords', source),
+    moods: requireStringArray(value.moods, 'moods', source),
+    tones: requireStringArray(value.tones, 'tones', source),
+    language: requireStringArray(value.language, 'language', source),
+    experienceVoice: requireString(value.experienceVoice, 'experienceVoice', source),
+    cities: requireStringArray(value.cities, 'cities', source),
+    hobbies: requireStringArray(value.hobbies, 'hobbies', source),
+    slangs: requireStringArray(value.slangs, 'slangs', source),
+    avoid: requireStringArray(value.avoid, 'avoid', source),
+    voiceSeed: requireString(value.voiceSeed, 'voiceSeed', source),
+    preferredLength: requirePreferredLength(value.preferredLength, source),
+    tweetLanguages: requireStringArray(value.tweetLanguages, 'tweetLanguages', source),
+    coldStartTopics: requireStringArray(value.coldStartTopics, 'coldStartTopics', source),
+  };
+}
 
-  // Casual slangs — used sparingly (1 per tweet max).
-  slangs: [
-    'hehe', 'lol', 'lmao', 'ngl', 'tbh', 'fr fr', 'no cap', 'bro',
-    'bruh', 'lowkey', 'highkey', 'based', 'W', 'L',
-    "it's giving", 'not gonna lie', 'the audacity',
-  ],
+function parseOwnerProfileJson(raw: string, source: string): OwnerProfileShape {
+  try {
+    return validateOwnerProfile(JSON.parse(raw), source);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(`Invalid owner profile in ${source}: JSON parse failed - ${error.message}`);
+    }
 
-  // Hard topic bans — agent never tweets about these.
-  avoid: [
-    'politics', 'sports', 'entertainment gossip', 'finance/crypto hype',
-    'motivational fluff without substance', 'topics unrelated to tech/AI/dev',
-  ],
+    throw error;
+  }
+}
 
-  // Short voice anchor used by personaEvolver when generating profile text.
-  voiceSeed:
-    'A GenZ Indian FullStack/AI engineer who builds in public. Tweets about real dev experiences, AI agents, shipping, and devtools. Casual, direct, dry humor, no fluff.',
+function loadProfileFile(path: string): OwnerProfileShape {
+  return parseOwnerProfileJson(readFileSync(path, 'utf8'), path);
+}
 
-  // Tweet length preference — informs length target when no outcome data yet.
-  preferredLength: 'medium',
+function firstExistingPath(paths: string[]): string | null {
+  return paths.find(path => path && existsSync(path)) ?? null;
+}
 
-  // ISO 639-1 language codes — trends in other languages are dropped.
-  tweetLanguages: ['en'],
+function loadOwnerProfile(): OwnerProfileShape {
+  const privateProfilePath = firstExistingPath([
+    RENDER_PRIVATE_PROFILE,
+    LOCAL_PRIVATE_PROFILE,
+  ]);
 
-  // Cold-start topic pool — used when trends are empty AND no topic supplied.
-  coldStartTopics: [
-    'the gap between LLM demos and shipping LLM in prod',
-    'why most AI agent frameworks are just retry loops',
-    'what nobody tells you about RAG in production',
-    'TypeScript strict mode second-guessing itself',
-    'the real cost of "just add a database"',
-    'prompt engineering as software engineering',
-    'side project graveyard confessions',
-    'the part of shipping nobody posts about',
-    'when `any` in TypeScript is actually the right call',
-    'what 2 years of building taught me about debugging',
-    'why most devs overbuild their first SaaS',
-    'the n8n / zapier / make spectrum',
-    'observability on a zero-budget deploy',
-    'Gemini vs Claude vs GPT for actual dev work',
-    'indie hacker time tax — what breaks first when you scale solo',
-  ],
-};
+  if (privateProfilePath) {
+    return loadProfileFile(privateProfilePath);
+  }
+
+  if (existsSync(LOCAL_EXAMPLE_PROFILE)) {
+    return loadProfileFile(LOCAL_EXAMPLE_PROFILE);
+  }
+
+  throw new Error(
+    `Missing owner profile. Create ownerProfile.private.json from ownerProfile.example.json, or upload ownerProfile.private.json as a Render Secret File at ${RENDER_PRIVATE_PROFILE}.`,
+  );
+}
+
+export const OWNER_PROFILE: OwnerProfileShape = loadOwnerProfile();
