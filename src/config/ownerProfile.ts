@@ -9,6 +9,21 @@ import { join } from 'node:path';
 
 type PreferredLength = 'short' | 'medium' | 'long';
 
+export interface TopicMixShape {
+  tech: number;
+  culture: number;
+}
+
+export interface CultureInterestsShape {
+  artists: string[];
+  companies: string[];
+  people: string[];
+  products: string[];
+  startups: string[];
+  songs: string[];
+  hobbies: string[];
+}
+
 export interface OwnerProfileShape {
   username: string;
   identity: string;
@@ -25,8 +40,15 @@ export interface OwnerProfileShape {
   voiceSeed: string;
   preferredLength: PreferredLength;
   tweetLanguages: string[];
+  topicMix: TopicMixShape;
+  evergreenTechTopics: string[];
+  personalTopics: string[];
+  cultureTopics: string[];
+  cultureInterests: CultureInterestsShape;
   coldStartTopics: string[];
 }
+
+const DEFAULT_TOPIC_MIX: TopicMixShape = { tech: 80, culture: 20 };
 
 const ROOT_DIR = process.cwd();
 const LOCAL_PRIVATE_PROFILE = join(ROOT_DIR, 'ownerProfile.private.json');
@@ -53,6 +75,71 @@ function requireStringArray(value: unknown, field: keyof OwnerProfileShape, sour
   return value;
 }
 
+function optionalStringArray(value: unknown, field: string, source: string): string[] {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || item.trim() === '')) {
+    throw new Error(`Invalid owner profile in ${source}: ${field} must be a string array when present`);
+  }
+
+  return value;
+}
+
+function optionalTopicMix(value: unknown, source: string): TopicMixShape {
+  if (value == null) return DEFAULT_TOPIC_MIX;
+  if (!isRecord(value)) {
+    throw new Error(`Invalid owner profile in ${source}: topicMix must be an object when present`);
+  }
+
+  const tech = value.tech;
+  const culture = value.culture;
+  if (
+    typeof tech !== 'number' ||
+    typeof culture !== 'number' ||
+    !Number.isFinite(tech) ||
+    !Number.isFinite(culture) ||
+    tech < 0 ||
+    culture < 0 ||
+    tech + culture <= 0
+  ) {
+    throw new Error(`Invalid owner profile in ${source}: topicMix.tech/topicMix.culture must be non-negative numbers with a positive total`);
+  }
+
+  return { tech, culture };
+}
+
+function optionalCultureInterests(value: unknown, source: string, fallbackHobbies: string[]): CultureInterestsShape {
+  if (value == null) {
+    return {
+      artists: [],
+      companies: [],
+      people: [],
+      products: [],
+      startups: [],
+      songs: [],
+      hobbies: fallbackHobbies,
+    };
+  }
+  if (!isRecord(value)) {
+    throw new Error(`Invalid owner profile in ${source}: cultureInterests must be an object when present`);
+  }
+
+  const interests = {
+    artists: optionalStringArray(value.artists, 'cultureInterests.artists', source),
+    companies: optionalStringArray(value.companies, 'cultureInterests.companies', source),
+    people: optionalStringArray(value.people, 'cultureInterests.people', source),
+    products: optionalStringArray(value.products, 'cultureInterests.products', source),
+    startups: optionalStringArray(value.startups, 'cultureInterests.startups', source),
+    songs: optionalStringArray(value.songs, 'cultureInterests.songs', source),
+    hobbies: optionalStringArray(value.hobbies, 'cultureInterests.hobbies', source),
+  };
+
+  if (interests.hobbies.length === 0) {
+    interests.hobbies = fallbackHobbies;
+  }
+
+  return interests;
+}
+
 function requirePreferredLength(value: unknown, source: string): PreferredLength {
   if (value !== 'short' && value !== 'medium' && value !== 'long') {
     throw new Error(`Invalid owner profile in ${source}: preferredLength must be short, medium, or long`);
@@ -66,6 +153,11 @@ function validateOwnerProfile(value: unknown, source: string): OwnerProfileShape
     throw new Error(`Invalid owner profile in ${source}: expected a JSON object`);
   }
 
+  const hobbies = requireStringArray(value.hobbies, 'hobbies', source);
+  const coldStartTopics = requireStringArray(value.coldStartTopics, 'coldStartTopics', source);
+  const evergreenTechTopics = optionalStringArray(value.evergreenTechTopics, 'evergreenTechTopics', source);
+  const personalTopics = optionalStringArray(value.personalTopics, 'personalTopics', source);
+
   return {
     username: requireString(value.username, 'username', source),
     identity: requireString(value.identity, 'identity', source),
@@ -76,13 +168,18 @@ function validateOwnerProfile(value: unknown, source: string): OwnerProfileShape
     language: requireStringArray(value.language, 'language', source),
     experienceVoice: requireString(value.experienceVoice, 'experienceVoice', source),
     cities: requireStringArray(value.cities, 'cities', source),
-    hobbies: requireStringArray(value.hobbies, 'hobbies', source),
+    hobbies,
     slangs: requireStringArray(value.slangs, 'slangs', source),
     avoid: requireStringArray(value.avoid, 'avoid', source),
     voiceSeed: requireString(value.voiceSeed, 'voiceSeed', source),
     preferredLength: requirePreferredLength(value.preferredLength, source),
     tweetLanguages: requireStringArray(value.tweetLanguages, 'tweetLanguages', source),
-    coldStartTopics: requireStringArray(value.coldStartTopics, 'coldStartTopics', source),
+    topicMix: optionalTopicMix(value.topicMix, source),
+    evergreenTechTopics: evergreenTechTopics.length > 0 ? evergreenTechTopics : coldStartTopics,
+    personalTopics: personalTopics.length > 0 ? personalTopics : hobbies,
+    cultureTopics: optionalStringArray(value.cultureTopics, 'cultureTopics', source),
+    cultureInterests: optionalCultureInterests(value.cultureInterests, source, hobbies),
+    coldStartTopics,
   };
 }
 

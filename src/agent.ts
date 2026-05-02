@@ -17,7 +17,7 @@ import { getNextFormatWithMeta } from "./draftFormats.js";
 import type { FormatArchetype } from "./draftFormats.js";
 import { getTopicPerformance } from "./analytics.js";
 import { OWNER_PROFILE } from "./config/ownerProfile.js";
-import { filterRelevantTrends } from "./trendRelevance.js";
+import { planTopic, type TopicPlan } from "./topicPlanner.js";
 import {
   recordTopicUsed,
   isTopicOnCooldown,
@@ -50,6 +50,7 @@ const AgentState = Annotation.Root({
   formatArchetype: Annotation<FormatArchetype | null>({ reducer: (x, y) => y ?? x, default: () => null }),
   recentFingerprints: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   topicFree: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
+  topicPlan: Annotation<TopicPlan | null>({ reducer: (x, y) => y ?? x, default: () => null }),
   coherent: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => true }),
   coherenceReason: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   hardProhibitions: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
@@ -93,6 +94,8 @@ export const llm = new ChatGoogleGenerativeAI({
     model: "gemini-2.5-flash-lite",
   }),
 ]);
+
+const GOOGLE_SEARCH_RETRIEVAL_TOOLS = [{ googleSearchRetrieval: {} }] as const;
 
 function finalizeDraft(raw: string): string {
   let s = (raw ?? "").trim();
@@ -253,17 +256,6 @@ function extractAvoidItems(profileText: string): {
   return result;
 }
 
-function pickColdStartTopic(recentTopics: readonly string[], blacklist: readonly string[]): string {
-  const pool = OWNER_PROFILE.coldStartTopics;
-  if (pool.length === 0) return '';
-  const recentLower = new Set(recentTopics.map((t) => t.toLowerCase()));
-  const blLower = new Set(blacklist.map((t) => t.toLowerCase()));
-  const eligible = pool.filter((t) => !recentLower.has(t.toLowerCase()) && !blLower.has(t.toLowerCase()));
-  const source = eligible.length > 0 ? eligible : pool;
-  const idx = Math.floor(Math.random() * source.length);
-  return source[idx] ?? source[0] ?? '';
-}
-
 async function contextLoader(state: typeof AgentState.State) {
   const start = Date.now();
   logger.info("Running contextLoader...");
@@ -311,7 +303,7 @@ async function contextLoader(state: typeof AgentState.State) {
   });
   const recentTopicsQuery = await prisma.tweet.findMany({
     orderBy: { created_at: 'desc' },
-    take: 10,
+    take: 20,
     select: { original_topic: true, edited_topic: true }
   });
   const activeProfile = await prisma.personaProfile.findFirst({
@@ -335,14 +327,13 @@ async function contextLoader(state: typeof AgentState.State) {
     .map(t => t.tweet.versions[0]?.content)
     .filter(Boolean) as string[];
   const recentFeedback = feedbackSource.map(f => `[Feedback from ${f.created_at.toISOString().split('T')[0]}]: ${f.feedback_text}`);
-  const recentTopics = recentTopicsQuery.map(t => t.edited_topic || t.original_topic);
+  const recentTopics = recentTopicsQuery
+    .map(t => t.edited_topic || t.original_topic)
+    .filter((topic) => topic && topic !== "AI Generating..." && topic !== "AI Generated");
   const learnedPersona = activeProfile?.profile_text ?? "";
 
-  const { relevant: relevantTrends, excluded: excludedTrends } =
-    filterRelevantTrends(trendingTopics);
-
-  // Derive topic selection + topic-free mode flag.
-  let topicFree = false;
+  // Supplied topics still obey the 48h topic cooldown. If blocked, clear the
+  // request and let the profile-first planner select a fresher topic.
   let resolvedTopic = (state.topic ?? '').trim();
   if (resolvedTopic && isTopicOnCooldown(resolvedTopic)) {
     blacklistInfo.list = Array.from(new Set([...blacklistInfo.list, resolvedTopic.toLowerCase()]));
@@ -352,11 +343,14 @@ async function contextLoader(state: typeof AgentState.State) {
     );
     resolvedTopic = '';
   }
-  if (!resolvedTopic) {
-    if (relevantTrends.length === 0) {
-      topicFree = true;
-    }
-  }
+
+  const topicPlan = planTopic({
+    requestedTopic: resolvedTopic,
+    trendingTopics,
+    recentTopics,
+    topicBlacklist: blacklistInfo.list,
+  });
+  resolvedTopic = topicPlan.topic;
 
   const avoidItems = extractAvoidItems(learnedPersona);
   const hardProhibitions: string[] = [
@@ -369,9 +363,14 @@ async function contextLoader(state: typeof AgentState.State) {
     duration: `${Date.now() - start}ms`,
     hasPersona: !!learnedPersona,
     trendCount: trendingTopics.length,
-    relevantTrendCount: relevantTrends.length,
-    excludedTrendCount: excludedTrends.length,
-    topicFree,
+    acceptedTrendCount: topicPlan.acceptedTrendCount,
+    rejectedTrendCount: topicPlan.rejectedTrendCount,
+    plannedTopic: topicPlan.topic,
+    topicLane: topicPlan.lane,
+    topicSource: topicPlan.source,
+    topicNeedsNewsContext: topicPlan.needsNewsContext,
+    recentLaneCounts: topicPlan.recentLaneCounts,
+    topicFree: false,
     lengthTarget,
     blacklistCount: blacklistInfo.list.length,
     blacklistSource: blacklistInfo.source,
@@ -390,14 +389,15 @@ async function contextLoader(state: typeof AgentState.State) {
     context,
     recentFeedback,
     recentTopics,
-    trendingTopics: relevantTrends.slice(0, 10),
+    trendingTopics: topicPlan.trendHints.slice(0, 10),
     learnedPersona,
     lengthTarget,
     topicBlacklist: blacklistInfo.list,
     iterationCount: state.iterationCount || 0,
     formatArchetype,
     recentFingerprints,
-    topicFree,
+    topicFree: false,
+    topicPlan,
     hardProhibitions,
     personaAvoidItems: hardProhibitions,
   };
@@ -433,7 +433,7 @@ ${state.learnedPersona}\n`
     : "";
 
   const trendingBlock = state.trendingTopics && state.trendingTopics.length > 0
-    ? `\n[TRENDING NOW — you MAY ground the post in one of these if it fits your voice; do NOT force it]:\n${state.trendingTopics.slice(0, 10).map(t => `- ${t}`).join('\n')}\n`
+    ? `\n[FRESHNESS HINTS FROM TRENDS24 - optional context only; the TOPIC PLAN below is the source of truth]:\n${state.trendingTopics.slice(0, 10).map(t => `- ${t}`).join('\n')}\n`
     : "";
 
   const exemplarsBlock = state.context && state.context.length > 0
@@ -480,9 +480,19 @@ Violation of the FORMAT DIRECTIVE makes the entire draft invalid. The quality sc
 `
     : "";
 
-  const topicFreeBlock = state.topicFree
-    ? `\n[TOPIC-FREE MODE — no relevant trend found. Pick a topic from the owner's domains below and ship a tweet that actually belongs to this persona. Do NOT invent news or product launches.]\n`
-    : '';
+  const topicPlanBlock = state.topicPlan
+    ? `\n[TOPIC PLAN - mandatory]
+Lane: ${state.topicPlan.lane}
+Source: ${state.topicPlan.source}
+Selected topic: ${state.topicPlan.topic}
+Angle: ${state.topicPlan.topicAngle}
+Reason: ${state.topicPlan.reason}
+Current-news context needed: ${state.topicPlan.needsNewsContext ? 'yes' : 'no'}
+
+Use the selected topic and angle. Do not replace this topic with a random trend or generic fallback.
+${state.topicPlan.lane === 'culture' ? 'Culture/personal posts must still sound like the owner, not like generic entertainment commentary.' : 'Tech posts should stay practical, specific, and builder/dev oriented.'}
+`
+    : "";
 
   const OWNER_IDENTITY = `You are ${OWNER_PROFILE.identity}
 
@@ -505,21 +515,44 @@ CITIES YOU VIBE WITH: ${OWNER_PROFILE.cities.join(', ')}
 HOBBIES/PERSONALITY:
 ${OWNER_PROFILE.hobbies.map(h => `- ${h}`).join('\n')}
 
+TOPIC MIX CONTRACT:
+- ${OWNER_PROFILE.topicMix.tech}% tech / AI / dev / product-engineering lane
+- ${OWNER_PROFILE.topicMix.culture}% culture / personal / named-interest lane
+
+EVERGREEN TECH TOPICS:
+${OWNER_PROFILE.evergreenTechTopics.map(t => `- ${t}`).join('\n')}
+
+PERSONAL TOPICS:
+${OWNER_PROFILE.personalTopics.map(t => `- ${t}`).join('\n')}
+
+CULTURE TOPICS:
+${OWNER_PROFILE.cultureTopics.length > 0 ? OWNER_PROFILE.cultureTopics.map(t => `- ${t}`).join('\n') : '- none configured'}
+
+CULTURE INTERESTS:
+Artists: ${OWNER_PROFILE.cultureInterests.artists.join(', ') || 'none configured'}
+Companies: ${OWNER_PROFILE.cultureInterests.companies.join(', ') || 'none configured'}
+People: ${OWNER_PROFILE.cultureInterests.people.join(', ') || 'none configured'}
+Products: ${OWNER_PROFILE.cultureInterests.products.join(', ') || 'none configured'}
+Startups: ${OWNER_PROFILE.cultureInterests.startups.join(', ') || 'none configured'}
+Songs: ${OWNER_PROFILE.cultureInterests.songs.join(', ') || 'none configured'}
+Hobbies: ${OWNER_PROFILE.cultureInterests.hobbies.join(', ') || 'none configured'}
+
 SLANGS (use sparingly, only when it fits naturally — 1 per tweet max):
 ${OWNER_PROFILE.slangs.join(', ')}
 
-NEVER write about: ${OWNER_PROFILE.avoid.join(', ')}.`;
+NEVER write about: ${OWNER_PROFILE.avoid.join(', ')}.
+Random entertainment gossip is still banned. Profile-listed culture interests are allowed only when the topic plan selects the culture lane.`;
 
   const personaParameters = `${hardProhibitionsBlock}${formatDirectiveBlock}${OWNER_IDENTITY}
-${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${topicFreeBlock}${lengthBlock}${blacklistBlock}Tone: ${toneInstruction}
+${learnedPersonaBlock}${exemplarsBlock}${trendingBlock}${topicPlanBlock}${lengthBlock}${blacklistBlock}Tone: ${toneInstruction}
 AVOID these recent topics exactly: ${state.recentTopics.join(', ')}.${recentFeedbackBlock}
 HOOK RULE: The first 60 characters MUST carry the core claim, punchline, or hook. Never waste the opener on setup or throat-clearing.
 
 CONTENT APPROACH — prefer in this order:
-1. First-person dev experiences ("spent 3h debugging X", "shipped Y today", "just realized Z")
-2. Opinions and observations ("RAG is mostly data cleaning", "half of AI engineering is prompt formatting")
-3. Dry humor about dev culture
-4. Industry news/releases — ONLY if it's in the TRENDING NOW list above. Never from memory.
+1. Follow the TOPIC PLAN exactly.
+2. For tech lane: first-person dev experiences, opinions, or dry product/engineering observations.
+3. For culture lane: personal/culture hooks filtered through dev life, product taste, music taste, hobbies, or founder/operator humor.
+4. Industry news/releases — ONLY if the topic plan says current-news context is needed and search grounding confirms it. Never from memory.
 
 VOICE ANTI-PATTERNS (NEVER do these — instant reject):
 - No metaphors about journeys, battles, or nature
@@ -528,11 +561,11 @@ VOICE ANTI-PATTERNS (NEVER do these — instant reject):
 - No literary flourishes. This is a tweet from a 23-year-old dev, not an essay
 - No passive voice. Active only.
 - No filler openers: "In today's world", "As we navigate", "It's important to"
-- No specific model version numbers (3.7, 4.0, o3, o1, etc.) framed as news or launches — versions are facts you can get wrong. Talk about the model by name only if it's in TRENDING NOW.
+- No specific model version numbers (3.7, 4.0, o3, o1, etc.) framed as news or launches — versions are facts you can get wrong. Talk about the model by name only if the topic plan selected it and search grounding confirms it.
 
 HINGLISH RULE: DO NOT force "bhai", "yaar", "arre yaar", "kya kar raha hai", or any Hinglish into the tweet. Use Hinglish ONLY if the tweet genuinely needs it for humor and reads awkwardly without it. When in doubt, use plain English. Forced Hinglish is worse than no Hinglish.
 
-RECENCY RULE: Today's date is ${new Date().toISOString().split('T')[0]}. NEVER frame anything as "just launched", "new release", "just dropped", or "breaking" unless it appears in the TRENDING NOW list above. Your training data may be months old — treat any specific product release, model version, or news event as potentially outdated. Stick to observations, opinions, and experiences rather than news claims.
+RECENCY RULE: Today's date is ${new Date().toISOString().split('T')[0]}. NEVER frame anything as "just launched", "new release", "just dropped", or "breaking" unless the topic plan says current-news context is needed and search grounding confirms it. Your training data may be months old — treat any specific product release, model version, or news event as potentially outdated. Stick to observations, opinions, and experiences rather than news claims.
 
 CASING RULE: After the first sentence ends (. or ! or ?), start the next word in lowercase UNLESS it is a proper noun, acronym, product name, brand, or title-case word (e.g. AI, LangGraph, React, Gemini, Claude, TypeScript, Node.js). Standard English nouns like "the", "it", "my", "this", "i" must be lowercase at sentence start (except the pronoun "I" which stays uppercase).
 
@@ -561,18 +594,16 @@ async function contentGenerator(state: typeof AgentState.State) {
     rerollBlock = `\n\n[STRUCTURAL RE-ROLL — the previous draft was rejected as structurally duplicate]\nYour previous draft: "${state.rejectedDraft}"\nIts structural fingerprint was: ${state.rejectedFingerprint}\nDO NOT produce a tweet with this structure. Use the NEW FORMAT DIRECTIVE at the top of this prompt — the archetype has been changed for this retry.\n\n`;
   }
 
-  // Cold-start fallback: when no topic and trends empty, pick from the
-  // cold-start pool rather than letting the model roll the dice.
-  let effectiveTopic = state.topic;
-  if (!effectiveTopic && state.topicFree) {
-    effectiveTopic = pickColdStartTopic(state.recentTopics ?? [], state.topicBlacklist ?? []);
-    if (effectiveTopic) {
-      logger.info({ coldStartTopic: effectiveTopic }, 'Selected cold-start topic');
-    }
-  }
+  const effectiveTopic = state.topic;
+  const topicAngleBlock = state.topicPlan
+    ? `\nTopic lane: ${state.topicPlan.lane}\nTopic source: ${state.topicPlan.source}\nTopic angle: ${state.topicPlan.topicAngle}\n`
+    : '';
+  const groundingBlock = state.topicPlan?.needsNewsContext
+    ? `\n[GOOGLE SEARCH GROUNDING ENABLED]\nUse search only to avoid stale factual claims about the selected topic. Do not include URLs, citations, or search-result summaries in the tweet. If search does not confirm a specific news fact, write an evergreen observation about the topic instead.\n`
+    : '';
 
   const prompt = `${state.personaParameters}
-${effectiveTopic ? `Topic: ${effectiveTopic}` : 'Generate a topic from your domains above and write a tweet.'}${revisionBlock}${rerollBlock}
+${effectiveTopic ? `Topic: ${effectiveTopic}` : 'Generate a topic from the owner profile topic buckets and write a tweet.'}${topicAngleBlock}${groundingBlock}${revisionBlock}${rerollBlock}
 Target: Generate both a Topic and a Draft.
 Output Format: TOPIC|DRAFT
 
@@ -593,7 +624,7 @@ GOOD (write like this):
 Constraints: Plain text only, under 280 characters, no markdown, no hashtags, no emojis.
 Ensure the last sentence is COMPLETED. DO NOT leave it hanging.
 CONTENT PRIORITY: Prefer first-person dev experiences and opinions over industry news. Experiences don't age. News does.
-RECENCY: NEVER say "just launched", "new release", "just dropped", or mention specific version numbers (3.7, 4.0, o3, etc.) as news unless the topic is in the TRENDING NOW list. Your training data may be months old.
+RECENCY: NEVER say "just launched", "new release", "just dropped", or mention specific version numbers (3.7, 4.0, o3, etc.) as news unless Google Search grounding is enabled for this topic and confirms the claim. Your training data may be months old.
 HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fits organically.`;
 
   try {
@@ -609,7 +640,40 @@ HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fit
     }
     await recordLLMCall("gemini-2.5-flash", "generate");
 
-    const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
+    const useGrounding = state.topicPlan?.needsNewsContext === true;
+    logger.info(
+      {
+        topic: effectiveTopic,
+        topicLane: state.topicPlan?.lane,
+        topicSource: state.topicPlan?.source,
+        googleSearchGrounding: useGrounding,
+      },
+      "Invoking content generator",
+    );
+    let res;
+    try {
+      res = await llm.invoke(prompt, {
+        signal: AbortSignal.timeout(CALL_TIMEOUT),
+        ...(useGrounding ? { tools: GOOGLE_SEARCH_RETRIEVAL_TOOLS } : {}),
+      });
+    } catch (groundingErr) {
+      if (!useGrounding) throw groundingErr;
+
+      const message = groundingErr instanceof Error ? groundingErr.message : String(groundingErr);
+      logger.warn({ err: message, topic: effectiveTopic }, "Grounded generation failed; retrying without Google Search");
+      const retryAllowance = await canCallLLM();
+      if (!retryAllowance.allowed) {
+        logger.warn({ reason: retryAllowance.reason }, "LLM rate limit reached before ungrounded retry");
+        return {
+          topic: effectiveTopic || state.topic || "Rate Limited",
+          draft: "",
+          iterationCount: 1,
+          rateLimited: true,
+        };
+      }
+      await recordLLMCall("gemini-2.5-flash", "generate_ungrounded_retry");
+      res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
+    }
     const content = (res.content as string).trim();
 
     let topic = effectiveTopic || state.topic || "AI Generated";
