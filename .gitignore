@@ -1,12 +1,15 @@
 node_modules
 .env
+.agents
+.code-review-graph
 dist
 build
 .next
 .DS_Store
 *.log
-cloudflare/.wrangler/
 cloudflare/wrangler.toml
 scratch/
 AGENTS.md
 CONTEXT.md
+ERRORS.md
+.codex

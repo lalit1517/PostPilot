@@ -525,8 +525,6 @@ PostPilot uses **Cloudflare Worker Cron** for scheduling.
 
 The Worker calls the protected `POST /api/cron/generate` endpoint on your Render app. PostPilot stores a unique `scheduled_slot_key` per UTC day/slot, so Cloudflare retries and Render cold-start repeats do not create duplicate scheduled drafts. Finished drafts are sent directly from PostPilot to Telegram.
 
-The cron Worker posts directly to `/api/cron/generate` and lets the app handle async generation. It intentionally does **not** run a blocking warm-up GET or fixed pre-generation sleep; UptimeRobot already keeps the Render root URL warm every 5 minutes, and blocking Worker-side warm-ups can hide cron delivery failures.
-
 The included schedule is:
 
 | Local time | UTC cron | Slot |
@@ -782,7 +780,6 @@ Cron Events should show invocations for:
 Useful log lines:
 
 ```text
-PostPilot cron trigger started
 PostPilot cron trigger accepted
 PostPilot manual trigger accepted
 PostPilot manual trigger failed

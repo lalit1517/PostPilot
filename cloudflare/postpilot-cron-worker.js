@@ -40,6 +40,14 @@ async function fetchWithTimeout(url, init = {}, timeoutMs = 25_000) {
   }
 }
 
+async function warmApp(baseUrl) {
+  try {
+    await fetchWithTimeout(`${baseUrl}/`, { method: 'GET' }, 20_000);
+  } catch (err) {
+    console.warn('Warm-up request failed; generate request will still retry', err);
+  }
+}
+
 async function triggerGeneration(env, controller) {
   const baseUrl = normalizeBaseUrl(env.POSTPILOT_BASE_URL);
   const apiKey = env.POSTPILOT_INTERNAL_API_KEY;
@@ -54,11 +62,8 @@ async function triggerGeneration(env, controller) {
     scheduled_slot_key: scheduledSlotKey,
   });
 
-  console.log('PostPilot cron trigger started', {
-    cron: controller.cron,
-    slot,
-    scheduledSlotKey,
-  });
+  await warmApp(baseUrl);
+  await sleep(20_000);
 
   let lastError = null;
   const delays = [0, 15_000, 60_000];
@@ -198,8 +203,8 @@ async function handleManualRequest(request, env) {
 }
 
 export default {
-  async scheduled(controller, env) {
-    await triggerGeneration(env, controller);
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(triggerGeneration(env, controller));
   },
 
   async fetch(request, env, ctx) {
