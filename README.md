@@ -33,7 +33,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 ## 💡 Core Innovations
 
 
-- **Layered Tweet Resolution**: Programmatic tweet-resolution using zero-width Unicode fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. This links live tweets to specific LLM versions without requiring the expensive official X API. 🔒
+- **Layered Tweet Resolution**: Programmatic tweet-resolution using zero-width Unicode fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. This links live tweets to specific LLM versions without relying on official API integrations. 🔒
 
 - **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Profile-First Topic Planner** (80/20 tech-vs-culture lane quota over recent topics), a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Classified Trend Relevance Layer** (Trends24 becomes candidate freshness, not fallback control), **Conditional Google Search grounding** for current/named-entity topics, **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
 
@@ -74,8 +74,8 @@ Cloudflare Cron           Telegram (notifications)
   RetryQueue  ──────>  Background Workers
      |                    |         |
      v                    v         v
-  Supabase DB       Nitter/X     Engagement
-  (PostgreSQL)      Scraper      Tracker
+  Supabase DB       Public Data     Engagement
+  (PostgreSQL)      Ingestion      Tracker
 ```
 
 
@@ -123,7 +123,7 @@ Generation (3 LLM calls max)
 | Trend Relevance | `src/trendRelevance.ts` | 0 | Classifies Trends24 output instead of binary keep/drop. Hard-excludes true banned lanes (politics, sports, finance/crypto, horoscope), allows tech trends through `domainKeywords`, allows culture/entertainment only when matched by `cultureInterests`, and preserves rejection reasons for audit logs. |
 | Topic Coherence | `src/topicCoherence.ts` | 0 | Pure-string gate that passes on (a) topic keyword overlap with draft OR (b) on-domain pivot (≥2 domain keywords). Feeds the `coherenceGate` graph node. |
 | Topic Memory | `src/topicMemory.ts` | 0 | In-memory 48h topic cooldown + per-topic coherence failure counter. Supplied topics still on cooldown are cleared before generation and folded into the blacklist, so a fresh topic is selected. Final accepted topics are recorded after both the direct path and `autoRefiner`. Survives DB outages; DB is long-term authoritative. 3-strike rule auto-blacklists a topic. |
-| Trends | `src/trends.ts` | 0 | Scrapes Trends24 global trends, 30-min cache, stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
+| Trends | `src/trends.ts` | 0 | Fetches publicly available Trends24 data with 30-min caching and stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
 | Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
 | Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
 | Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
@@ -249,7 +249,7 @@ Detects posted tweets via a layered resolver: exact invisible fingerprint match 
 
 1. Triggered 10 minutes after the signed X intent redirect or manual Posted confirmation.
 
-2. Polls a shuffled Nitter source list (override with `NITTER_INSTANCES`; built-in default includes `nitter.net`, `xcancel.com`, `nitter.privacyredirect.com`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`, `nitter.tiekoetter.com`, `lightbrd.com`) and falls back to the native Twitter timeline with browser-like headers. Hosts that return `403`, `429`, `5xx`, or fetch failures are cooled down for 30 minutes.
+2. Queries a rotating set of public data sources (override with `NITTER_INSTANCES`; built-in default includes `nitter.net`, `xcancel.com`, `nitter.privacyredirect.com`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`, `nitter.tiekoetter.com`, `lightbrd.com`) and falls back to the native Twitter timeline with browser-like headers. Hosts that return `403`, `429`, `5xx`, or fetch failures are cooled down for 30 minutes.
 
 3. Primary match: looks for the exact 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 
@@ -1071,13 +1071,13 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 
 ## 🛡️ Safety & Policy Compliance
 
-PostPilot is designed as a **Stealth Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
+PostPilot is designed as a **Safety-First Autonomous Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
 
 - **Human-in-the-Loop (HITL)**: AI drafts, you post. No account credentials ever handed to an automated script — you stay a regular user in X's eyes.
 
 - **Layered Resolution**: Zero-width Unicode (`U+200B`/`U+200C`) fingerprints, tolerant truncated-fingerprint matching, and visible-text fallback link drafts to engagement without using the Official X API or visible tracking IDs.
 
-- **Decoupled Scraping**: Tracking via Nitter + public Syndication API. Your account is never used to scrape, so tracking rate-limits never touch your handle.
+- **Decoupled Data Collection**: Tracking via publicly available data sources and syndication endpoints. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
 - **Content Diversity Gate**: Dual-layer check (trigram Jaccard + FORMAT-prefixed structural fingerprint) plus LRU rotation across 8 format archetypes with hard banned-opening lists. Survives Render restarts via heuristic format-map backfill (no schema migration). Protects against shadowbans and same-shape pattern decay.
 
