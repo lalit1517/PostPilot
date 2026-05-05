@@ -35,7 +35,7 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 
 - **Layered Tweet Resolution**: Programmatic tweet-resolution using zero-width Unicode fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. This links live tweets to specific LLM versions without relying on official API integrations. 🔒
 
-- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Profile-First Topic Planner** (80/20 tech-vs-culture lane quota over recent topics), a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Classified Trend Relevance Layer** (Trends24 becomes candidate freshness, not fallback control), **Conditional Google Search grounding** for current/named-entity topics, **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
+- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Profile-First Topic Planner** (80/20 tech-vs-culture lane quota over recent topics plus bucket-aware selection across domains, evergreen tech, personal topics, culture topics, artists, companies, people, products, startups, songs, and hobbies), a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Classified Trend Relevance Layer** (Trends24 becomes candidate freshness, not fallback control), **Conditional Google Search grounding** for current/named-entity topics, **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
 
 - **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance. 🧪
 
@@ -119,7 +119,7 @@ Generation (3 LLM calls max)
 | Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
 | Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier + arc tokens. Emits a `DiversityReport` on every rejection. Ships an in-memory **format map** (LRU 30) and a boot-time **heuristic backfill** (`guessFormatFromContent`) so FORMAT-prefixed fingerprints survive Render restarts. |
 | Draft Formats | `src/draftFormats.ts` | 0 | 8 archetypes, each with `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, `exampleFirstSentence`. `getNextFormatWithMeta()` exposes which formats were considered + unused count for logging. Pure and deterministic. |
-| Topic Planner | `src/topicPlanner.ts` | 0 | Profile-first topic router. Enforces `OWNER_PROFILE.topicMix` against the last 20 DB topics, chooses a tech or culture lane, folds Trends24 classifications into candidate pools, avoids recent/blacklisted topics, and returns `{ topic, lane, source, topicAngle, needsNewsContext, reason }` for logs and prompts. |
+| Topic Planner | `src/topicPlanner.ts` | 0 | Profile-first topic router. Enforces `OWNER_PROFILE.topicMix` against the last 20 DB topics, chooses a tech or culture lane, then picks a weighted profile bucket inside that lane. Candidate buckets include trends, domains, evergreen tech, personal topics, culture topics, artists, companies, people, products, startups, songs, and hobbies. Avoids recent/blacklisted topics and returns `{ topic, lane, source, topicBucket, topicAngle, needsNewsContext, reason }` for logs and prompts. |
 | Trend Relevance | `src/trendRelevance.ts` | 0 | Classifies Trends24 output instead of binary keep/drop. Hard-excludes true banned lanes (politics, sports, finance/crypto, horoscope), allows tech trends through `domainKeywords`, allows culture/entertainment only when matched by `cultureInterests`, and preserves rejection reasons for audit logs. |
 | Topic Coherence | `src/topicCoherence.ts` | 0 | Pure-string gate that passes on (a) topic keyword overlap with draft OR (b) on-domain pivot (≥2 domain keywords). Feeds the `coherenceGate` graph node. |
 | Topic Memory | `src/topicMemory.ts` | 0 | In-memory 48h topic cooldown + per-topic coherence failure counter. Supplied topics still on cooldown are cleared before generation and folded into the blacklist, so a fresh topic is selected. Final accepted topics are recorded after both the direct path and `autoRefiner`. Survives DB outages; DB is long-term authoritative. 3-strike rule auto-blacklists a topic. |
@@ -141,7 +141,7 @@ Generation (3 LLM calls max)
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Sequential DB fetch: **slot-aware exemplars** (top 5 tweets from `TweetOutcome` filtered by `time_of_day = currentSlot` ordered by `outcome_score`, with global fallback to top-5 by raw likes when slot has <3 samples — logs `exemplarSource: 'slot_filtered' \| 'global_fallback'` + `slotSampleCount`), weighted feedback, active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()`, last 15 FORMAT-prefixed structural fingerprints, and last 20 topics for lane quota. Trends24 is fetched in parallel (non-DB), then `planTopic()` chooses a structured profile-first topic plan and logs accepted/rejected trend counts, lane, source, reason, and `needsNewsContext`. Supplied topics still respect the 48h cooldown; blocked supplied topics are cleared before planning. |
+| `contextLoader` | No | Sequential DB fetch: **slot-aware exemplars** (top 5 tweets from `TweetOutcome` filtered by `time_of_day = currentSlot` ordered by `outcome_score`, with global fallback to top-5 by raw likes when slot has <3 samples — logs `exemplarSource: 'slot_filtered' \| 'global_fallback'` + `slotSampleCount`), weighted feedback, active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()`, last 15 FORMAT-prefixed structural fingerprints, and last 20 topics for lane/bucket quota. Trends24 is fetched in parallel (non-DB), then `planTopic()` chooses a structured profile-first topic plan and logs accepted/rejected trend counts, lane, source, bucket, reason, recent lane counts, recent bucket counts, and `needsNewsContext`. Supplied topics still respect the 48h cooldown; blocked supplied topics are cleared before planning. |
 | `personaAdapter` | No | Builds the prompt top-down: (1) `---HARD PROHIBITIONS---`, (2) `---FORMAT DIRECTIVE (MANDATORY)---`, (3) `OWNER_IDENTITY` from `src/config/ownerProfile.ts` including topic mix, tech topics, personal topics, culture topics, and culture interests, (4) learned persona, few-shot exemplars, optional freshness hints, mandatory `TOPIC PLAN`, length target, topic blacklist, tone-by-time-of-day, feedback guidelines, recency/casing rules, and the `VOICE ANTI-PATTERNS` guardrail. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT` from the planned topic and angle. Rate-guarded via `canCallLLM()` (returns `nextAvailableAt` timestamp on block). If `topicPlan.needsNewsContext` is true, the generation call passes Gemini Google Search retrieval tooling so named/current topics can be grounded; otherwise it stays ungrounded and evergreen. Structural re-roll still injects the rejected fingerprint/draft. Output passed through `finalizeDraft()`. Calls `registerDraftFormat(tweetId, formatName)`. On rate-limit, sets `rateLimited: true` and the graph short-circuits to `END`. |
 | `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state; this cleared marker is what lets `afterDiversityGate` proceed to scoring after a successful re-roll. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. This graph node is the diversity enforcement point; the older server-side warning-only duplicate check was removed. |
@@ -179,7 +179,7 @@ Generation (3 LLM calls max)
 
 - `recordTopicUsed(topic)` / `isTopicOnCooldown(topic)` / `getInMemoryBlacklist()` / `incrementCoherenceFailure(topic)` — in-memory 48h cooldown + 3-strike coherence counter. Supplied topics that are still on cooldown are cleared and added to the blacklist before generation picks a fresh topic. Final accepted topics are recorded after either the direct pass or `autoRefiner`.
 
-- `planTopic(input)` — profile-first topic planner. Returns `{ topic, lane, source, topicAngle, needsNewsContext, reason }` and enforces the configured tech/culture mix against recent DB topics.
+- `planTopic(input)` — profile-first topic planner. Returns `{ topic, lane, source, topicBucket, topicAngle, needsNewsContext, reason }`, enforces the configured tech/culture mix against recent DB topics, and then chooses a weighted bucket inside the selected lane so the full owner profile can surface over time.
 
 - `classifyTrends(trends)` / `filterRelevantTrends(trends)` — trend classification. `classifyTrends()` is the current structured API; `filterRelevantTrends()` remains as a compatibility wrapper.
 
@@ -416,11 +416,12 @@ On Render, the recommended setup is a **Secret File**:
 | `voiceSeed` | `personaEvolver.ts` | Voice anchor used when the LLM evolves the persona, so the profile can be supplied by the runtime owner configuration instead of a hardcoded voice. |
 | `preferredLength` | length target seed | `'short' \| 'medium' \| 'long'`. Soft hint until enough outcome data exists for `computeLengthTarget()` to derive a real range. |
 | `tweetLanguages` | `trendRelevance.ts` | ISO 639-1 codes. When `'en'` is in the list, non-ASCII trends are rejected unless they match a configured culture interest. |
+| `domains` | `topicPlanner.ts`, prompts | Tech-domain seed pool plus prompt boundary. These now compete as the `domains` bucket inside the tech lane instead of only acting as prompt context. |
 | `topicMix` | `topicPlanner.ts` | Lane ratio, e.g. `{ "tech": 80, "culture": 20 }`. The planner checks the last 20 DB topics and chooses the underrepresented lane when needed. |
-| `evergreenTechTopics` | `topicPlanner.ts` | Tech/AI/dev topic pool. Old profiles that only have `coldStartTopics` automatically use that list as `evergreenTechTopics`. |
-| `personalTopics` | `topicPlanner.ts` | Hobbies, cities, life observations, and personality topics. Missing values fall back to `hobbies`. |
-| `cultureTopics` | `topicPlanner.ts` | Profile-approved culture/product/startup/music topic seeds. |
-| `cultureInterests` | `trendRelevance.ts`, `topicPlanner.ts` | Allowlists for artists, companies, people, products, startups, songs, and hobbies. Trends matching these can enter the culture lane; random entertainment still stays blocked. |
+| `evergreenTechTopics` | `topicPlanner.ts` | Tech/AI/dev topic bucket. Old profiles that only have `coldStartTopics` automatically use that list as `evergreenTechTopics`. |
+| `personalTopics` | `topicPlanner.ts` | Personal/culture bucket for hobbies, cities, life observations, and personality topics. Missing values fall back to `hobbies`. |
+| `cultureTopics` | `topicPlanner.ts` | Profile-approved culture/product/startup/music topic bucket. |
+| `cultureInterests` | `trendRelevance.ts`, `topicPlanner.ts` | Bucketed allowlists for artists, companies, people, products, startups, songs, and hobbies. Trends matching these can enter the culture lane; random entertainment still stays blocked. These fields also compete as direct profile topic buckets when the culture lane is selected. |
 | `coldStartTopics` | legacy profile compatibility | Kept for older private profiles. New topic selection uses `evergreenTechTopics` through `topicPlanner.ts`; `pickColdStartTopic()` and `topicFree` fallback are no longer the generation path. |
 
 ### How topics are selected
@@ -431,7 +432,8 @@ The agent now chooses topics through `src/topicPlanner.ts` before generation. Th
 {
   topic: string;
   lane: "tech" | "culture";
-  source: "user_supplied" | "trend" | "evergreen_tech" | "personal" | "culture" | "profile_fallback";
+  source: "user_supplied" | "trend" | "domain" | "evergreen_tech" | "personal" | "culture" | "culture_interest" | "profile_fallback";
+  topicBucket: "user_supplied" | "trend" | "domains" | "evergreen_tech" | "personal" | "culture_topics" | "artists" | "companies" | "people" | "products" | "startups" | "songs" | "hobbies" | "profile_fallback";
   topicAngle: string;
   needsNewsContext: boolean;
   reason: string;
@@ -443,8 +445,9 @@ Selection order:
 1. Respect a supplied `/api/generate` or manual `?topic=` unless it is inside the 48h cooldown.
 2. Classify Trends24 items as candidate freshness signals; trends do not control fallback behavior.
 3. Count the last 20 DB topics by inferred lane and enforce `topicMix`.
-4. Pick from the selected lane's eligible profile/trend candidates while avoiding recent and blacklisted topics.
-5. Pass the selected topic and angle to `contentGenerator`.
+4. Count recent profile buckets and apply a recency penalty so one bucket (for example `evergreen_tech`) does not monopolize selection.
+5. Pick from the selected lane's eligible profile/trend buckets while avoiding recent and blacklisted topics.
+6. Pass the selected topic, bucket, and angle to `contentGenerator`.
 
 `needsNewsContext=true` enables Gemini Google Search retrieval for the generation call. It is used for trend-derived or named-entity topics such as companies, products, tech CEOs, artists, startups, and songs. Evergreen tech or personal topics stay ungrounded.
 

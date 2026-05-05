@@ -368,8 +368,11 @@ async function contextLoader(state: typeof AgentState.State) {
     plannedTopic: topicPlan.topic,
     topicLane: topicPlan.lane,
     topicSource: topicPlan.source,
+    topicBucket: topicPlan.topicBucket,
+    topicReason: topicPlan.reason,
     topicNeedsNewsContext: topicPlan.needsNewsContext,
     recentLaneCounts: topicPlan.recentLaneCounts,
+    recentBucketCounts: topicPlan.recentBucketCounts,
     topicFree: false,
     lengthTarget,
     blacklistCount: blacklistInfo.list.length,
@@ -484,6 +487,7 @@ Violation of the FORMAT DIRECTIVE makes the entire draft invalid. The quality sc
     ? `\n[TOPIC PLAN - mandatory]
 Lane: ${state.topicPlan.lane}
 Source: ${state.topicPlan.source}
+Bucket: ${state.topicPlan.topicBucket}
 Selected topic: ${state.topicPlan.topic}
 Angle: ${state.topicPlan.topicAngle}
 Reason: ${state.topicPlan.reason}
@@ -596,7 +600,7 @@ async function contentGenerator(state: typeof AgentState.State) {
 
   const effectiveTopic = state.topic;
   const topicAngleBlock = state.topicPlan
-    ? `\nTopic lane: ${state.topicPlan.lane}\nTopic source: ${state.topicPlan.source}\nTopic angle: ${state.topicPlan.topicAngle}\n`
+    ? `\nTopic lane: ${state.topicPlan.lane}\nTopic source: ${state.topicPlan.source}\nTopic bucket: ${state.topicPlan.topicBucket}\nTopic angle: ${state.topicPlan.topicAngle}\n`
     : '';
   const groundingBlock = state.topicPlan?.needsNewsContext
     ? `\n[GOOGLE SEARCH GROUNDING ENABLED]\nUse search only to avoid stale factual claims about the selected topic. Do not include URLs, citations, or search-result summaries in the tweet. If search does not confirm a specific news fact, write an evergreen observation about the topic instead.\n`
