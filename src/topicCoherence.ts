@@ -18,7 +18,7 @@ function tokenize(text: string): string[] {
     .toLowerCase()
     .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !STOPWORDS.has(w))
+    .filter((w) => (w.length > 2 || /^[a-z0-9]{2}$/.test(w)) && !STOPWORDS.has(w))
     .map(stemToken);
 }
 
@@ -43,7 +43,12 @@ export interface CoherenceResult {
  *  3. draft has >=2 domain keywords — it's on-domain, even if the specific
  *     topic keyword was paraphrased.
  */
-export function checkTopicCoherence(draft: string, topic: string | null | undefined): CoherenceResult {
+export function checkTopicCoherence(
+  draft: string,
+  topic: string | null | undefined,
+  options: { allowDomainPivot?: boolean } = {},
+): CoherenceResult {
+  const allowDomainPivot = options.allowDomainPivot ?? true;
   const topicStr = (topic ?? '').trim();
   if (!topicStr) {
     return {
@@ -67,6 +72,16 @@ export function checkTopicCoherence(draft: string, topic: string | null | undefi
       reason: 'direct_keyword_overlap',
       topicKeywords,
       overlappingKeywords: overlapping,
+      domainMatches: [],
+    };
+  }
+
+  if (!allowDomainPivot) {
+    return {
+      coherent: false,
+      reason: 'no_direct_topic_match',
+      topicKeywords,
+      overlappingKeywords: [],
       domainMatches: [],
     };
   }

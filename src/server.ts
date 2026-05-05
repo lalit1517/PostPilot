@@ -9,7 +9,8 @@ import rateLimit from "express-rate-limit";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import { agentGraph } from "./agent.js";
-import { generateUniqueFingerprint, appendFingerprint } from "./fingerprint.js";
+import { generateUniqueFingerprint, appendFingerprint, stripInvisibleFingerprint } from "./fingerprint.js";
+import { fitVisibleDraftToLimit, getConfiguredXPostCharLimit, getPostLength, getVisibleDraftCharLimit, getVisibleLength } from "./postLimits.js";
 import { getRateStatus } from "./rateGuard.js";
 import {
   getEngagementPattern,
@@ -310,6 +311,7 @@ async function processGenerationInBackground(
       topic: topic ?? "",
       previousDraft: previousDraft ?? "",
       currentFeedback: currentFeedback ?? "",
+      forceTopic: Boolean((topic ?? "").trim()),
       iterationCount: 0,
     })) as any;
 
@@ -374,7 +376,45 @@ async function processGenerationInBackground(
       }
     }
 
+    let visibleDraftLen = getVisibleLength(tweetDraft);
+    const visibleDraftLimit = getVisibleDraftCharLimit(invisibleSuffix.length);
+    if (visibleDraftLen > visibleDraftLimit) {
+      const fitted = fitVisibleDraftToLimit(tweetDraft, visibleDraftLimit);
+      tweetDraft = fitted.draft;
+      visibleDraftLen = fitted.finalLength;
+      logger.warn(
+        {
+          tweetId,
+          originalVisibleDraftLen: fitted.originalLength,
+          fittedVisibleDraftLen: fitted.finalLength,
+          visibleDraftLimit,
+          xPostCharLimit: getConfiguredXPostCharLimit(),
+          invisibleFingerprintLen: invisibleSuffix.length,
+        },
+        "Generated draft exceeded visible budget; trimmed deterministically before fingerprinting",
+      );
+    }
+
     tweetDraft = appendFingerprint(tweetDraft, invisibleSuffix);
+    const fullPostLen = getPostLength(tweetDraft);
+    const xPostCharLimit = getConfiguredXPostCharLimit();
+    if (fullPostLen > xPostCharLimit) {
+      logger.error(
+        {
+          tweetId,
+          visibleDraftLen,
+          fullPostLen,
+          xPostCharLimit,
+          invisibleFingerprintLen: invisibleSuffix.length,
+        },
+        "Fingerprint-appended draft exceeds configured X post limit",
+      );
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: "ERROR" },
+      });
+      return;
+    }
 
     // Generate Intent URL and Tracking Redirect
     const encodedTweet = encodeURIComponent(tweetDraft);
@@ -396,6 +436,7 @@ async function processGenerationInBackground(
           content: tweetDraft,
           version: 1,
           critique: finalState.critique,
+          quality_score: finalState.score || 0,
         },
       },
     };
@@ -415,7 +456,7 @@ async function processGenerationInBackground(
       success: true,
       tweet_id: tweetId,
       draft: tweetDraft,
-      topic: updatedTweet.original_topic,
+      topic: updatedTweet.edited_topic || updatedTweet.original_topic,
       time_of_day,
       score: updatedTweet.score,
       intentUrl: trackerUrl,
@@ -427,12 +468,19 @@ async function processGenerationInBackground(
     };
 
     logger.info(
-      { tweetId, draftLen: payload.draft.length, intentUrl: payload.intentUrl },
+      {
+        tweetId,
+        visibleDraftLen,
+        fullPostLen,
+        xPostCharLimit,
+        invisibleFingerprintLen: invisibleSuffix.length,
+        intentUrl: payload.intentUrl,
+      },
       "Background generation finished. Prepared payload.",
     );
     // Diagnostic log — server-side only, never sent to client
     logger.info(
-      { tweetId, draftLen: payload.draft.length },
+      { tweetId, visibleDraftLen, fullPostLen, xPostCharLimit },
       "Background generation payload ready",
     );
 
@@ -1181,7 +1229,7 @@ app.post("/api/feedback", async (req, res) => {
 
   if (tweet) {
     const topicToUse = tweet.edited_topic || tweet.original_topic;
-    const oldDraft = tweet.versions[0]?.content || "";
+    const oldDraft = stripInvisibleFingerprint(tweet.versions[0]?.content || "");
 
     processGenerationInBackground(
       id,

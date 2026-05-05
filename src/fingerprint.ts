@@ -56,6 +56,14 @@ export function appendFingerprint(content: string, invisibleFingerprint: string)
 }
 
 /**
+ * Removes the invisible fingerprint run from stored tweet content.
+ * Useful when reusing a prior draft as LLM context.
+ */
+export function stripInvisibleFingerprint(content: string): string {
+  return (content ?? '').replace(/[\u200B\u200C]+/g, '').trim();
+}
+
+/**
  * Extracts the invisible fingerprint from a tweet string (if any),
  * returning the original hex value. Returns null if not found.
  */
