@@ -8,8 +8,9 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
-import { agentGraph } from "./agent.js";
-import { generateUniqueFingerprint, appendFingerprint } from "./fingerprint.js";
+import { agentGraph, coherenceGate, qualityScorer } from "./agent.js";
+import { generateUniqueFingerprint, appendFingerprint, stripInvisibleFingerprint } from "./fingerprint.js";
+import { fitVisibleDraftToLimit, getConfiguredXPostCharLimit, getPostLength, getVisibleDraftCharLimit, getVisibleLength } from "./postLimits.js";
 import { getRateStatus } from "./rateGuard.js";
 import {
   getEngagementPattern,
@@ -310,6 +311,7 @@ async function processGenerationInBackground(
       topic: topic ?? "",
       previousDraft: previousDraft ?? "",
       currentFeedback: currentFeedback ?? "",
+      forceTopic: Boolean((topic ?? "").trim()),
       iterationCount: 0,
     })) as any;
 
@@ -345,6 +347,22 @@ async function processGenerationInBackground(
       return;
     }
 
+    if (finalState.validationFailed) {
+      logger.error(
+        {
+          tweetId,
+          reason: finalState.coherenceReason,
+          iterationCount: finalState.iterationCount,
+        },
+        "Generation failed validation after refinement",
+      );
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: "ERROR" },
+      });
+      return;
+    }
+
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
 
     const currentTweet = await prisma.tweet.findUnique({
@@ -374,7 +392,90 @@ async function processGenerationInBackground(
       }
     }
 
+    let visibleDraftLen = getVisibleLength(tweetDraft);
+    const visibleDraftLimit = getVisibleDraftCharLimit(invisibleSuffix.length);
+    if (visibleDraftLen > visibleDraftLimit) {
+      const fitted = fitVisibleDraftToLimit(tweetDraft, visibleDraftLimit);
+      tweetDraft = fitted.draft;
+      visibleDraftLen = fitted.finalLength;
+      logger.warn(
+        {
+          tweetId,
+          originalVisibleDraftLen: fitted.originalLength,
+          fittedVisibleDraftLen: fitted.finalLength,
+          visibleDraftLimit,
+          xPostCharLimit: getConfiguredXPostCharLimit(),
+          invisibleFingerprintLen: invisibleSuffix.length,
+          fitFunction: "fitVisibleDraftToLimit",
+          fingerprintFunction: "appendFingerprint",
+          scorerFunction: "qualityScorer",
+          coherenceFunction: "coherenceGate",
+        },
+        "Post-agent visible-budget safety trim fired; re-running qualityScorer/coherenceGate before appendFingerprint",
+      );
+
+      const rescored = await qualityScorer({ ...finalState, draft: tweetDraft });
+      Object.assign(finalState, rescored);
+
+      const recohered = await coherenceGate({ ...finalState, draft: tweetDraft });
+      Object.assign(finalState, recohered);
+
+      logger.warn(
+        {
+          tweetId,
+          score: finalState.score,
+          coherent: finalState.coherent,
+          coherenceReason: finalState.coherenceReason,
+          critiqueHints: finalState.critiqueHints,
+          scorerFunction: "qualityScorer",
+          coherenceFunction: "coherenceGate",
+          fitFunction: "fitVisibleDraftToLimit",
+          nextFunction: "appendFingerprint",
+        },
+        "Re-scored fitted draft before persistence and fingerprint append",
+      );
+
+      if (finalState.coherent === false || finalState.validationFailed) {
+        logger.error(
+          {
+            tweetId,
+            reason: finalState.coherenceReason,
+            validationFailed: finalState.validationFailed,
+            fitFunction: "fitVisibleDraftToLimit",
+            scorerFunction: "qualityScorer",
+            coherenceFunction: "coherenceGate",
+            skippedFunction: "appendFingerprint",
+          },
+          "Fitted draft failed re-scoring/coherence after post-agent trim",
+        );
+        await prisma.tweet.update({
+          where: { id: tweetId },
+          data: { status: "ERROR" },
+        });
+        return;
+      }
+    }
+
     tweetDraft = appendFingerprint(tweetDraft, invisibleSuffix);
+    const fullPostLen = getPostLength(tweetDraft);
+    const xPostCharLimit = getConfiguredXPostCharLimit();
+    if (fullPostLen > xPostCharLimit) {
+      logger.error(
+        {
+          tweetId,
+          visibleDraftLen,
+          fullPostLen,
+          xPostCharLimit,
+          invisibleFingerprintLen: invisibleSuffix.length,
+        },
+        "Fingerprint-appended draft exceeds configured X post limit",
+      );
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: "ERROR" },
+      });
+      return;
+    }
 
     // Generate Intent URL and Tracking Redirect
     const encodedTweet = encodeURIComponent(tweetDraft);
@@ -396,6 +497,7 @@ async function processGenerationInBackground(
           content: tweetDraft,
           version: 1,
           critique: finalState.critique,
+          quality_score: finalState.score || 0,
         },
       },
     };
@@ -415,7 +517,7 @@ async function processGenerationInBackground(
       success: true,
       tweet_id: tweetId,
       draft: tweetDraft,
-      topic: updatedTweet.original_topic,
+      topic: updatedTweet.edited_topic || updatedTweet.original_topic,
       time_of_day,
       score: updatedTweet.score,
       intentUrl: trackerUrl,
@@ -427,12 +529,18 @@ async function processGenerationInBackground(
     };
 
     logger.info(
-      { tweetId, draftLen: payload.draft.length, intentUrl: payload.intentUrl },
+      {
+        tweetId,
+        visibleDraftLen,
+        fullPostLen,
+        xPostCharLimit,
+        invisibleFingerprintLen: invisibleSuffix.length,
+      },
       "Background generation finished. Prepared payload.",
     );
     // Diagnostic log — server-side only, never sent to client
     logger.info(
-      { tweetId, draftLen: payload.draft.length },
+      { tweetId, visibleDraftLen, fullPostLen, xPostCharLimit },
       "Background generation payload ready",
     );
 
@@ -1181,7 +1289,7 @@ app.post("/api/feedback", async (req, res) => {
 
   if (tweet) {
     const topicToUse = tweet.edited_topic || tweet.original_topic;
-    const oldDraft = tweet.versions[0]?.content || "";
+    const oldDraft = stripInvisibleFingerprint(tweet.versions[0]?.content || "");
 
     processGenerationInBackground(
       id,

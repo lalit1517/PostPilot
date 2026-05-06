@@ -1,6 +1,8 @@
 # 🚀 PostPilot
 
-PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered by LangGraph, it manages a complete content lifecycle—from drafting and invisible fingerprinting to 72-hour engagement tracking and outcome-driven persona evolution—all within a single self-learning loop. The system integrates a Human-in-the-Loop (HITL) safety gate via Telegram, ensuring 100% human verification before any content is published.
+PostPilot is a professional-grade autonomous AI agent for X (Twitter).
+LangGraph manages drafting, invisible fingerprinting, 72-hour engagement tracking, and persona evolution.
+Telegram provides the Human-in-the-Loop (HITL) safety gate, so every post still needs human approval before publication.
 
 ## 📑 Table of Contents
 
@@ -33,15 +35,15 @@ PostPilot is a professional-grade, autonomous AI agent for X (Twitter). Powered 
 ## 💡 Core Innovations
 
 
-- **Layered Tweet Resolution**: Programmatic tweet-resolution using zero-width Unicode fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. This links live tweets to specific LLM versions without relying on official API integrations. 🔒
+- **Layered Tweet Resolution**: Links live tweets to draft versions with zero-width fingerprints, tolerant truncated-fingerprint matching, and same-author visible-text fallback. No official X API is required. 🔒
 
-- **LangGraph Orchestration**: Built on a Directed Acyclic Graph (DAG) rather than a simple prompt. Features a **Profile-First Topic Planner** (80/20 tech-vs-culture lane quota over recent topics plus bucket-aware selection across domains, evergreen tech, personal topics, culture topics, artists, companies, people, products, startups, songs, and hobbies), a **Dual-Layer Diversity Gate** (text trigram + topic-agnostic structural fingerprint), a **Format Rotation System** that forces LRU archetype variety with FORMAT-prefixed fingerprints (survives restarts via heuristic backfill), a **Topic Coherence Gate** that validates draft-topic alignment without an extra LLM call, a **Classified Trend Relevance Layer** (Trends24 becomes candidate freshness, not fallback control), **Conditional Google Search grounding** for current/named-entity topics, **Hard Prompt Prohibitions** extracted from persona AVOID sections, and a **Conditional Auto-Refiner** that triggers on low scores OR coherence mismatches.
+- **LangGraph Orchestration**: Uses a real DAG instead of one prompt, combining topic planning, diversity, format rotation, coherence, trend relevance, grounding, prohibitions, and refinement.
 
-- **Autonomous Persona Evolution**: A true closed-loop self-learning system. It analyzes its own top-performing tweets every 22 hours, extracts new stylistic patterns, and automatically updates its system prompt to align with audience resonance. 🧪
+- **Autonomous Persona Evolution**: A closed-loop learner. Every 22 hours, it studies recent high-tier tweets, extracts useful style patterns, and updates the active persona prompt. 🧪
 
-- **Free-Tier Monolith Architecture**: High-density engineering designed specifically for resource-constrained environments. Consolidates the Express API and a multi-task Background Worker into a single process that fits perfectly within Render's Free Tier.
+- **Free-Tier Monolith Architecture**: Built for constrained hosting. The Express API and multi-task background worker run in one Render-friendly process.
 
-- **Scientific Quality Analysis**: Includes advanced analytics like **Pearson Correlation** tracking between LLM-assigned quality scores and real-world engagement, allowing for data-backed calibration of the agent's intelligence. 📈
+- **Scientific Quality Analysis**: Tracks Pearson correlation between LLM quality scores and real engagement, so scoring can be calibrated from outcome data. 📈
 
 
 <a id="tech-stack"></a>
@@ -83,7 +85,7 @@ Cloudflare Cron           Telegram (notifications)
 
 1. **Orchestration** — Cloudflare Worker Cron triggers `/api/cron/generate` at 09:00, 13:30, and 22:00 IST. PostPilot sends Telegram draft notifications directly with inline buttons (post, edit, feedback).
 
-2. **Intelligence** — LangGraph StateGraph with 7 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
+2. **Intelligence** — LangGraph StateGraph with 9 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner, postRefinerGate, finalTopicMemory). Gemini 2.5 Flash primary, with fallback chain.
 
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution) using due-task scheduling instead of fixed idle polling.
 
@@ -95,9 +97,9 @@ Cloudflare Cron           Telegram (notifications)
 PostPilot improves its own writing over time without manual tuning.
 
 ```
-Generation (3 LLM calls max)
+Generation (2-3 LLM calls typical)
   -> contextLoader pulls slot-aware exemplars (top tweets at THIS time-of-day)
-  -> qualityScorer persists quality_score (1.0-10.0, 1 dp) to TweetVersion
+  -> qualityScorer returns quality_score (1.0-10.0, 1 dp); server persists it to the new TweetVersion
   -> Engagement tracked at 10m, 1h, 6h, 24h, 48h, 72h (likes + retweets + replies)
   -> At 72h: computeOutcomeScore() -> TweetOutcome record
        (log-scaled raw = log1p(likes + retweets×3 + replies×5), min-max vs 30d window)
@@ -114,44 +116,53 @@ Generation (3 LLM calls max)
 
 | Module | File | LLM Calls | Purpose |
 | :--- | :--- | :--- | :--- |
-| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Normalizes peak engagement (0-100) with **log-scaled** min-max vs 30-day window. Raw formula: `log1p(peak_likes + peak_retweets × 3 + peak_replies × 5)` — replies weighted highest (hardest engagement to earn), log scaling kills outlier tyranny so one viral tweet doesn't crush every other score to zero. Persists `topic`, `time_of_day`, `day_of_week`, `peak_replies` for analytics. Tiers: top 20% = high, bottom 30% = low. |
-| Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Weights feedback by nearby tweet outcomes (±3 day window), recency decay `1 / (1 + days_since)`, and sentiment multiplier from `feedbackSentiment`. |
-| Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex/keyword classifier: `positive \| negative \| stylistic \| neutral`. Multipliers 1.2 / 1.3 / 1.0 / 0.8. |
-| Draft Diversity | `src/draftDiversity.ts` | 0 | Dual-layer check against last 20 drafts: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5 drafts. Topic-agnostic opening classifier + arc tokens. Emits a `DiversityReport` on every rejection. Ships an in-memory **format map** (LRU 30) and a boot-time **heuristic backfill** (`guessFormatFromContent`) so FORMAT-prefixed fingerprints survive Render restarts. |
-| Draft Formats | `src/draftFormats.ts` | 0 | 8 archetypes, each with `openingTemplate`, `bannedOpenings`, `bannedPhrases?`, `exampleFirstSentence`. `getNextFormatWithMeta()` exposes which formats were considered + unused count for logging. Pure and deterministic. |
-| Topic Planner | `src/topicPlanner.ts` | 0 | Profile-first topic router. Enforces `OWNER_PROFILE.topicMix` against the last 20 DB topics, chooses a tech or culture lane, then picks a weighted profile bucket inside that lane. Candidate buckets include trends, domains, evergreen tech, personal topics, culture topics, artists, companies, people, products, startups, songs, and hobbies. Avoids recent/blacklisted topics and returns `{ topic, lane, source, topicBucket, topicAngle, needsNewsContext, reason }` for logs and prompts. |
-| Trend Relevance | `src/trendRelevance.ts` | 0 | Classifies Trends24 output instead of binary keep/drop. Hard-excludes true banned lanes (politics, sports, finance/crypto, horoscope), allows tech trends through `domainKeywords`, allows culture/entertainment only when matched by `cultureInterests`, and preserves rejection reasons for audit logs. |
-| Topic Coherence | `src/topicCoherence.ts` | 0 | Pure-string gate that passes on (a) topic keyword overlap with draft OR (b) on-domain pivot (≥2 domain keywords). Feeds the `coherenceGate` graph node. |
-| Topic Memory | `src/topicMemory.ts` | 0 | In-memory 48h topic cooldown + per-topic coherence failure counter. Supplied topics still on cooldown are cleared before generation and folded into the blacklist, so a fresh topic is selected. Final accepted topics are recorded after both the direct path and `autoRefiner`. Survives DB outages; DB is long-term authoritative. 3-strike rule auto-blacklists a topic. |
-| Trends | `src/trends.ts` | 0 | Fetches publicly available Trends24 data with 30-min caching and stale fallback on fetch error. Tracks `consecutiveZeroFetches` — on 3 consecutive zero parses logs CRITICAL (regex may have drifted) and nulls the cache to retry fresh. |
-| Analytics | `src/analytics.ts` | 0 | `getEngagementPattern()` (slot × day pivot), `getTopicPerformance()` (topic leaderboard), `getQualityOutcomeCorrelation()` (Pearson r). |
-| Persona Evolver | `src/personaEvolver.ts` | 1/day | Analyzes top 10 high-tier tweets, extracts TONE/STRUCTURE/STRONG_TOPICS/AVOID/SIGNATURE_PHRASES. Runs a **Structure Diversity Audit**: flags any opening or narrative arc shared by 3+ top posts under AVOID (`OVERUSED_STRUCTURE`, `OVERUSED_ARC`, `OVERUSED_PHRASE`). Voice constraint reads from `OWNER_PROFILE.voiceSeed`. **Persona drift detection**: word-overlap vs. previous profile > 0.85 logs a WARN ("high-tier tweets may be too homogeneous"). 22h cooldown gate. |
-| Rate Guard | `src/rateGuard.ts` | 0 | Tracks calls in `LlmCallLog`. Blocks at 5 RPM or 19 RPD (current app-side setting). On block, returns `nextAvailableAt` ISO timestamp so logs carry actionable info. `getRateStatus()` exposes current consumption. Prunes entries older than 48h. Keep the constants aligned with the active Google AI tier/model quota. |
+| Outcome Scorer | `src/outcomeScorer.ts` | 0 | Computes 0-100 outcome scores from peak likes, retweets, and replies using log-scaled 30-day min-max normalization. Persists topic/time metadata and assigns high/medium/low tiers. |
+| Feedback Weighter | `src/feedbackWeighter.ts` | 0 | Converts raw feedback into weighted guidance using nearby outcomes, recency decay, and sentiment multiplier. |
+| Feedback Sentiment | `src/feedbackSentiment.ts` | 0 | Regex classifier for `positive`, `negative`, `stylistic`, and `neutral` feedback with fixed multipliers. |
+| Draft Diversity | `src/draftDiversity.ts` | 0 | Rejects near-duplicates with trigram similarity plus recent structural fingerprints; keeps FORMAT-prefixed history via in-memory map and boot backfill. |
+| Draft Formats | `src/draftFormats.ts` | 0 | Defines 8 deterministic writing archetypes with opening templates, banned openings, examples, and LRU rotation metadata. |
+| Topic Planner | `src/topicPlanner.ts` | 0 | Profile-first router that enforces tech/culture mix, chooses a bucket, avoids recent/blacklisted topics, and returns the structured topic plan used in prompts/logs. |
+| Trend Relevance | `src/trendRelevance.ts` | 0 | Classifies Trends24 candidates: allows profile-matched tech/culture trends, rejects banned lanes, and records rejection reasons. |
+| Topic Coherence | `src/topicCoherence.ts` | 0 | Pure string gate for topic overlap or allowed domain pivot; explicit user topics disable pivot and require direct overlap. |
+| Topic Memory | `src/topicMemory.ts` | 0 | In-memory 48h cooldown plus coherence-failure counter; explicit user topics are never silently substituted, and final topics are recorded after any accepted path. |
+| Trends | `src/trends.ts` | 0 | Fetches/caches Trends24 for 30 minutes, falls back safely, and logs CRITICAL after repeated zero parses. |
+| Analytics | `src/analytics.ts` | 0 | Exposes slot/day engagement patterns, topic performance, and quality-vs-outcome correlation. |
+| Persona Evolver | `src/personaEvolver.ts` | 1/day | Evolves the learned persona from recent high-tier tweets, including structure-diversity flags and drift warnings; 22h cooldown. |
+| Rate Guard | `src/rateGuard.ts` | 0 | Tracks LLM calls, enforces 5 RPM / 19 RPD app-side limits, returns `nextAvailableAt`, exposes status, and prunes old logs. |
 
 
 <a id="ai-agent-langgraph"></a>
 
 ## 🧠 AI Agent (LangGraph)
 
-**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner if score < 8 OR coherence failed] -> finalTopicMemory -> END`
+**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner -> postRefinerGate if needed] -> finalTopicMemory -> END`
 
-**Re-roll edge:** `diversityGate -> personaAdapter` (capped at 1 re-roll). On rejection, a **different format archetype** is selected via `getNextFormatWithMeta()` and the rejected fingerprint + draft are persisted to state. `contentGenerator` then injects a `[STRUCTURAL RE-ROLL]` block naming the exact fingerprint and draft the model must NOT reproduce. The reroll routes through `personaAdapter` so the new format + prohibitions bake into the prompt before the retry. `afterDiversityGate` only routes back while `rejectedFingerprint` is still set; accepted drafts clear that marker and advance to `qualityScorer`, preventing repeated generate calls from tripping the 5 RPM guard.
+**Re-roll edge:** `diversityGate -> personaAdapter` is capped at one retry.
+A rejected draft gets a new format, and its rejected fingerprint/text are saved to state.
+The retry prompt names the exact structure to avoid.
+Accepted drafts clear `rejectedFingerprint` and move to `qualityScorer`, so the graph cannot loop into the 5 RPM guard.
 
-**Rate-limit short-circuit edge:** `contentGenerator -> END` when `rateLimited === true`. Skips diversityGate, qualityScorer, coherenceGate, autoRefiner, fingerprint injection, and draft notification. Tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead.
+**Rate-limit short-circuit edge:** when `rateLimited === true`, `contentGenerator -> END`.
+The graph skips later gates, fingerprinting, and draft notification.
+The tweet becomes `GENERATION_RATE_LIMITED`, and Telegram receives a warning.
 
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
-| `contextLoader` | No | Sequential DB fetch: **slot-aware exemplars** (top 5 tweets from `TweetOutcome` filtered by `time_of_day = currentSlot` ordered by `outcome_score`, with global fallback to top-5 by raw likes when slot has <3 samples — logs `exemplarSource: 'slot_filtered' \| 'global_fallback'` + `slotSampleCount`), weighted feedback, active PersonaProfile, `computeLengthTarget()`, `computeTopicBlacklist()`, last 15 FORMAT-prefixed structural fingerprints, and last 20 topics for lane/bucket quota. Trends24 is fetched in parallel (non-DB), then `planTopic()` chooses a structured profile-first topic plan and logs accepted/rejected trend counts, lane, source, bucket, reason, recent lane counts, recent bucket counts, and `needsNewsContext`. Supplied topics still respect the 48h cooldown; blocked supplied topics are cleared before planning. |
-| `personaAdapter` | No | Builds the prompt top-down: (1) `---HARD PROHIBITIONS---`, (2) `---FORMAT DIRECTIVE (MANDATORY)---`, (3) `OWNER_IDENTITY` from `src/config/ownerProfile.ts` including topic mix, tech topics, personal topics, culture topics, and culture interests, (4) learned persona, few-shot exemplars, optional freshness hints, mandatory `TOPIC PLAN`, length target, topic blacklist, tone-by-time-of-day, feedback guidelines, recency/casing rules, and the `VOICE ANTI-PATTERNS` guardrail. |
-| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT` from the planned topic and angle. Rate-guarded via `canCallLLM()` (returns `nextAvailableAt` timestamp on block). If `topicPlan.needsNewsContext` is true, the generation call passes Gemini Google Search retrieval tooling so named/current topics can be grounded; otherwise it stays ungrounded and evergreen. Structural re-roll still injects the rejected fingerprint/draft. Output passed through `finalizeDraft()`. Calls `registerDraftFormat(tweetId, formatName)`. On rate-limit, sets `rateLimited: true` and the graph short-circuits to `END`. |
-| `diversityGate` | No | Runs `checkDraftDiversity()` against the last 20 drafts. Dual check: (1) trigram Jaccard ≥ 0.65, (2) structural fingerprint match against last 5. On duplicate, picks a **new format** for the re-roll and persists `rejectedFingerprint` + `rejectedDraft`; routes via `personaAdapter` → `contentGenerator`. Second duplicate accepted. Accepted drafts push `FORMAT:<name>\|OPEN:<kind>\|<arc tokens>` to the in-memory ring buffer and clear the reject-state; this cleared marker is what lets `afterDiversityGate` proceed to scoring after a successful re-roll. Counts the draft's own fingerprint against recent history → `structuralRepetitionCount` state field consumed by the scorer. This graph node is the diversity enforcement point; the older server-side warning-only duplicate check was removed. |
-| `qualityScorer` | Yes | Prompt now opens with a `---STRUCTURAL CONTEXT FOR SCORING---` block naming the draft's fingerprint, its count in recent history, and explicit penalty rules (-1 at 2+ matches, -2 at 4+). Scores **1.0-10.0 with one decimal of precision** (e.g. 7.4, 8.2, 9.7) via `parseScore()` — model is instructed to differentiate similar drafts via the decimal and parser defensively rounds to 1 dp. Voice-authenticity criteria enforced. Runs `parseCritiqueHints()` → fixed hint vocabulary (`too_long`, `weak_hook`, `vague_claim`, `low_energy`, `cliche`, `too_jargon`, `weak_ending`, `poor_flow`, `needs_emotion`, `low_quality`, `wrong_voice`, plus `topic_drift` added by coherenceGate). Persists `quality_score` to TweetVersion. |
-| `coherenceGate` | No | Pure-string check via `checkTopicCoherence()`. Passes when topic is empty, or draft shares a topic keyword, or draft has ≥2 domain keywords (on-domain pivot). On mismatch: increments per-topic failure counter, degrades a high score to 6 to force a refiner pass, appends `topic_drift` to hints. At 3 strikes, auto-blacklists the topic via `recordTopicUsed`. |
-| `autoRefiner` | Conditional | Runs when score < 8 OR coherence failed. Reuses `state.personaParameters` (carries HARD PROHIBITIONS + FORMAT DIRECTIVE at top) and tells the model it MUST still obey those constraints on rewrite. Maps hints → `HINT_DIRECTIVES` (e.g. `topic_drift` → "TOPIC GROUNDING — draft must explicitly reference topic X, if irrelevant, acknowledge and pivot"). Output gated by `isSuspiciousDraft()`; rejection keeps original. |
-| `finalTopicMemory` | No | Records the final accepted topic into the 48h in-memory cooldown after either the direct high-score path or the `autoRefiner` path. This prevents refiner-produced drafts from skipping topic memory and repeating yesterday's topic today. |
+| `contextLoader` | No | Loads exemplars, weighted feedback, persona, length/blacklist data, recent fingerprints/topics, and classified trends. Builds a structured topic plan; automatic topics respect cooldown while explicit user topics set `forceTopic`. |
+| `personaAdapter` | No | Builds the full prompt: prohibitions, format directive, owner identity, persona/examples, topic plan, visible post budget, blacklist, tone, feedback rules, and anti-patterns. |
+| `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`, optionally uses Google Search for current/named topics, applies revision/re-roll instructions, finalizes text, registers format, and short-circuits on rate limit. |
+| `diversityGate` | No | Enforces trigram + structural diversity against recent drafts. On first duplicate, changes format and re-routes through `personaAdapter`; accepted drafts clear reject state and update fingerprint memory. |
+| `qualityScorer` | Yes | Scores 1.0-10.0 with one decimal, applies structural and revision penalties, parses fixed critique hints, and returns the score for `server.ts` to persist. Accepted refined drafts keep this pre-refine score and label it in the critique instead of spending another scorer call. |
+| `coherenceGate` | No | Checks feedback compliance and topic coherence without LLM. User-supplied topics require direct overlap; failures lower high scores and add `topic_drift` / `feedback_drift` for refinement. |
+| `autoRefiner` | Conditional | Rewrites when score is low, coherence/revision fails, or draft is too long. Reuses prompt constraints; suspicious rewrites are rejected, and fitted drafts are revalidated before topic memory. |
+| `postRefinerGate` | No | Re-runs revision and topic checks on refined drafts. Valid drafts continue; one failed validation can retry refinement, then fails closed. |
+| `finalTopicMemory` | No | Records the accepted final topic into the 48h cooldown after the direct path or a validated refined path. |
 
 
-**Owner Identity (`OWNER_PROFILE`)**: **Single runtime contract at [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts)**. The repo ships a public-safe [`ownerProfile.example.json`](ownerProfile.example.json). Runtime loads `ownerProfile.private.json` first; if it is missing, it falls back to the example profile. Upload the private file to Render as a Secret File so personal persona data is not committed to GitHub. See [Customizing the Owner Profile](#customizing-the-owner-profile) for setup.
+**Owner Identity (`OWNER_PROFILE`)**: [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts) is the runtime contract.
+The repo ships a public-safe [`ownerProfile.example.json`](ownerProfile.example.json).
+Runtime prefers `ownerProfile.private.json`, then falls back to the example.
+Upload the private file to Render as a Secret File so personal persona data stays out of Git.
 
 **Draft safety helpers** (pure computation, zero extra LLM calls):
 
@@ -159,7 +170,7 @@ Generation (3 LLM calls max)
 
 - `parseScore(raw)` — extracts score from free-form LLM output. Falls back to `7` (neutral) on parse failure, never `0`.
 
-- `isSuspiciousDraft(draft)` — rejects empty, `<40` chars, `>280` chars, missing terminator, preamble leak, markdown artifacts.
+- `isSuspiciousDraft(draft)` — rejects empty, `<40` chars, drafts over the configured visible X post budget, missing terminator, preamble leak, markdown artifacts.
 
 - `parseCritiqueHints(critique, draft, score)` — maps free-form critique → fixed hint vocabulary for `autoRefiner`.
 
@@ -173,13 +184,13 @@ Generation (3 LLM calls max)
 
 - `getNextFormatWithMeta(recentFingerprints)` — pure, deterministic LRU archetype selector over 8 archetypes. Returns `{ selected, unusedCount, consideredRecentFormats }` so rotation is loggable.
 
-- `composeFingerprint(formatName, observed)` / `pushFingerprintToBuffer(fp)` / `registerDraftFormat(tweetId, name)` / `getRecentStructuralFingerprints(n)` — fingerprint plumbing. Ring buffer in-memory; on restart, a boot-time `backfillFormatMap()` scans recent `TweetVersion` rows and calls `guessFormatFromContent()` heuristically so FORMAT-prefixed fingerprints survive Render restarts without a schema migration.
+- Fingerprint helpers keep recent FORMAT-prefixed shape history in memory. Boot backfill scans recent `TweetVersion` rows and guesses formats after Render restarts.
 
-- `checkTopicCoherence(draft, topic)` — pure-string coherence check. Passes on topic keyword overlap OR on-domain pivot (≥2 domain keywords in draft).
+- `checkTopicCoherence(draft, topic, { allowDomainPivot })` — pure-string coherence. It passes on topic keyword overlap, or on-domain pivot when allowed. Explicit user topics disable the pivot.
 
-- `recordTopicUsed(topic)` / `isTopicOnCooldown(topic)` / `getInMemoryBlacklist()` / `incrementCoherenceFailure(topic)` — in-memory 48h cooldown + 3-strike coherence counter. Supplied topics that are still on cooldown are cleared and added to the blacklist before generation picks a fresh topic. Final accepted topics are recorded after either the direct pass or `autoRefiner`.
+- Topic memory helpers enforce a 48h cooldown plus a 3-strike coherence counter. Automatic topics respect cooldown. Explicit user topics set `forceTopic`. Final topics are recorded after direct and refined paths.
 
-- `planTopic(input)` — profile-first topic planner. Returns `{ topic, lane, source, topicBucket, topicAngle, needsNewsContext, reason }`, enforces the configured tech/culture mix against recent DB topics, and then chooses a weighted bucket inside the selected lane so the full owner profile can surface over time.
+- `planTopic(input)` — profile-first planner. It enforces the tech/culture mix, chooses a weighted bucket, and returns the structured topic plan used by prompts and logs.
 
 - `classifyTrends(trends)` / `filterRelevantTrends(trends)` — trend classification. `classifyTrends()` is the current structured API; `filterRelevantTrends()` remains as a compatibility wrapper.
 
@@ -192,7 +203,10 @@ Generation (3 LLM calls max)
 
 ## 👷 Background Workers
 
-The `RetryQueue` table manages three async task types. The worker schedules itself around the earliest pending `process_after` instead of polling the database on a fixed idle loop; if no task exists, it performs a 15-minute reconciliation check. New tasks created through `enqueueRetry()` wake the in-process scheduler immediately.
+The `RetryQueue` table manages three async task types.
+The worker sleeps until the earliest pending `process_after` instead of polling on a fixed loop.
+If the queue is empty, it reconciles every 15 minutes.
+New `enqueueRetry()` tasks wake it immediately.
 
 ### 🔘 Telegram Buttons — What Each Does
 
@@ -207,9 +221,9 @@ When a draft arrives in Telegram, you get four buttons. Here's exactly what each
 
 3. You post it manually on X
 
-4. 10 minutes later, `RESOLVE_TWEET` fires automatically. On success, it marks the tweet `POSTED_CONFIRMED`, edits the Telegram message text to show `Status: ✅ Marked as Posted`, removes callback buttons, and starts engagement tracking.
+4. 10 minutes later, `RESOLVE_TWEET` runs. On success, it marks the tweet `POSTED_CONFIRMED`, edits Telegram to `Status: ✅ Marked as Posted`, removes buttons, and starts engagement tracking.
 
-PostPilot stores the Telegram `chat_id` + `message_id` as soon as the draft message is sent, because URL buttons do not send callback metadata when tapped. That stored message reference is what lets the worker update the original Telegram message after automatic resolution.
+PostPilot stores `chat_id` + `message_id` when the draft is sent. URL buttons do not send callback metadata, so this stored reference lets the worker update the original Telegram message later.
 
 
 **✅ Posted** — manual override only. Use this when:
@@ -227,11 +241,13 @@ If `RESOLVE_TWEET` still finds nothing after all retries (~62 min total: 10 min 
 1. Marks the tweet `RESOLVE_FAILED` and resets `posted=false`, `posted_at=null`.
 2. Edits the original Telegram message via `editMessageText`, showing `Status: ↩️ Not Posted` and removing the keyboard so no final-state callback can be tapped.
 
-If the resolver finds the tweet, it shows `Status: ✅ Marked as Posted` and removes callback buttons. Telegram inline buttons with `callback_data` always send a webhook POST when tapped, so final status is represented in message text rather than a fake disabled button.
+If the resolver finds the tweet, it shows `Status: ✅ Marked as Posted` and removes callback buttons.
+Telegram `callback_data` buttons always POST when tapped, so final status lives in message text rather than fake disabled buttons.
 
-> The worker resolution guard skips on `live_url` set or `status === 'RESOLVE_FAILED'` — NOT on `posted=true`. The manual click sets `posted=true` optimistically; gating on it would silently drop every manual-confirm task before it polls. Earlier versions had this bug — the button never changed back even after hours.
+> The worker resolution guard skips on `live_url` set or `status === 'RESOLVE_FAILED'`, not on `posted=true`.
+> Manual confirmation sets `posted=true` optimistically; gating on it would drop every manual-confirm task before polling.
 
-This covers two common cases: you clicked ✅ Posted but never actually posted, or the tweet got deleted/unpublished before the worker could confirm it. No manual cleanup needed — the Telegram message self-corrects after resolver success or final failure.
+This covers two common cases: you clicked ✅ Posted but never posted, or the tweet disappeared before confirmation. Telegram self-corrects after resolver success or final failure.
 
 > **You almost never need the Posted button.** Open in X handles everything automatically through the layered resolver. Posted is the escape hatch for when you want to optimistically confirm that you posted.
 
@@ -249,17 +265,17 @@ Detects posted tweets via a layered resolver: exact invisible fingerprint match 
 
 1. Triggered 10 minutes after the signed X intent redirect or manual Posted confirmation.
 
-2. Queries a rotating set of public data sources (override with `NITTER_INSTANCES`; built-in default includes `nitter.net`, `xcancel.com`, `nitter.privacyredirect.com`, `nitter.privacydev.net`, `nitter.poast.org`, `nitter.space`, `nitter.tiekoetter.com`, `lightbrd.com`) and falls back to the native Twitter timeline with browser-like headers. Hosts that return `403`, `429`, `5xx`, or fetch failures are cooled down for 30 minutes.
+2. Queries rotating public sources from `NITTER_INSTANCES` or the built-in default list. Then it falls back to the native Twitter timeline with browser-like headers. Failed/rate-limited hosts cool down for 30 minutes.
 
 3. Primary match: looks for the exact 8-char hex fingerprint embedded as invisible Unicode (`U+200B`/`U+200C`). Fingerprint generation pre-checks the DB to avoid `@unique` collisions.
 
-4. Secondary match: accepts a 28-31 zero-width-character run only when it decodes to a strong prefix of the stored fingerprint **and** nearby visible text matches the stored draft. This handles mobile/X clients that trim a trailing zero-width character.
+4. Secondary match: accepts a 28-31 zero-width run only when it decodes to a strong fingerprint prefix and nearby visible text matches the draft. This handles clients that trim a trailing zero-width character.
 
-5. Fallback match: extracts same-author tweet candidates from X/Nitter responses and compares normalized visible text against the stored `TweetVersion.content`. Candidates must be recent; when `created_at` is missing, the worker derives the timestamp from the X snowflake ID.
+5. Fallback match: compares recent same-author candidates against normalized `TweetVersion.content`. If `created_at` is missing, the worker derives time from the X snowflake ID.
 
 6. On match: marks tweet as `POSTED_CONFIRMED`, updates the Telegram message text to `Status: ✅ Marked as Posted`, removes callback buttons, and schedules the first engagement fetch.
 
-7. On miss: schedules one short retry at ~7 minutes, then one final delayed retry at ~45 minutes. If all attempts miss, sets status to `RESOLVE_FAILED`, resets `posted=false`, `posted_at=null`, updates the Telegram message text to `Status: ↩️ Not Posted`, and removes callback buttons — prevents the tweet from silently appearing as posted when it wasn't confirmed.
+7. On miss: schedules a short retry at ~7 minutes, then a final retry at ~45 minutes. If all attempts miss, it sets `RESOLVE_FAILED`, resets posted fields, edits Telegram, and removes buttons.
 
 **Editing tweets before posting:** The invisible fingerprint is appended after a trailing space at the very end of the draft — i.e. `[tweet text] [invisible chars]`. It is safe to edit visible text, but changing the final text heavily can weaken the visible-text fallback. The resolver can tolerate some trailing zero-width truncation, but deleting through the invisible suffix, select-all retyping, or posting a substantially different draft can still force `RESOLVE_FAILED`.
 
@@ -306,7 +322,7 @@ PostPilot tracks engagement over 72 hours by default (6 snapshots). You can chan
     }
     ```
 
-*   **Important**: If you increase the number of attempts beyond 6, you must also update the `maxRetries` argument passed to `enqueueRetry` for `FETCH_ENGAGEMENT` (currently `6`, in two locations around lines 115 and 438) to ensure the database doesn't mark the task as failed before it finishes the cycle.
+*   **Important**: If attempts go beyond 6, also update the `maxRetries` passed to `enqueueRetry` for `FETCH_ENGAGEMENT` (currently `6`). Otherwise the database can mark the task failed before the cycle finishes.
 
 ### EVOLVE_PERSONA
 
@@ -352,7 +368,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | Model | Purpose |
 | :--- | :--- |
 | `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted when the draft is sent to Telegram, and refreshed on manual ✅ Posted clicks, so the worker can edit the original message with final `Status: ✅ Marked as Posted` or `Status: ↩️ Not Posted` text) |
-| `TweetVersion` | Versioned drafts with `quality_score` (set by qualityScorer) |
+| `TweetVersion` | Versioned drafts with `quality_score` (returned by qualityScorer and persisted by server when the version is created; accepted refined drafts label pre-refine scores in `critique`) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
 | `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics (`peak_likes`, `peak_retweets`, `peak_replies`), `quality_score` copy, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
@@ -387,7 +403,7 @@ Then edit `ownerProfile.private.json` with your real username, identity, domains
 
 You can use [`prompts/owner-profile-builder.md`](prompts/owner-profile-builder.md) with the LLM you talk to regularly, such as ChatGPT, Claude, or Gemini, to help build or enrich your private owner profile.
 
-Use **patch mode** first unless you are creating a profile from scratch. Patch mode asks the LLM to return only additions for the fields that drive topic selection and voice, which makes review safer than replacing the whole file.
+Use **patch mode** first unless you are creating a profile from scratch. It asks the LLM for additions only, which makes review safer than replacing the whole file.
 
 Important guardrails:
 
@@ -449,7 +465,9 @@ Selection order:
 5. Pick from the selected lane's eligible profile/trend buckets while avoiding recent and blacklisted topics.
 6. Pass the selected topic, bucket, and angle to `contentGenerator`.
 
-`needsNewsContext=true` enables Gemini Google Search retrieval for the generation call. It is used for trend-derived or named-entity topics such as companies, products, tech CEOs, artists, startups, and songs. Evergreen tech or personal topics stay ungrounded.
+`needsNewsContext=true` enables Gemini Google Search retrieval for generation.
+It is used for trends and named entities like companies, products, tech CEOs, artists, startups, and songs.
+Evergreen tech and personal topics stay ungrounded.
 
 <a id="setup"></a>
 
@@ -486,7 +504,8 @@ npm install
 
 ### 2. Configure environment
 
-> **The committed owner profile is a public example.** Copy `ownerProfile.example.json` to ignored `ownerProfile.private.json` for local use, and upload that private file to Render. See [Customizing the Owner Profile](#customizing-the-owner-profile).
+> **The committed owner profile is a public example.** Copy `ownerProfile.example.json` to ignored `ownerProfile.private.json` for local use.
+> Upload that private file to Render. See [Customizing the Owner Profile](#customizing-the-owner-profile).
 
 Create `.env` in the project root (use `.env.example` as a template):
 
@@ -507,6 +526,7 @@ GOOGLE_API_KEY=...                     # Get from https://aistudio.google.com/ap
                                        # Choose models (Gemini 1.5/2.0/Flash) based on their specific RPM/RPD limits.
 X_USERNAME=your_handle                 # X handle for tweet resolution scraping
                                        # Must match username in the runtime owner profile.
+X_POST_CHAR_LIMIT=280                  # Full X composer limit. Keep 280 for free/non-Premium standard posts; use a higher value only for Premium longer-post accounts.
 NITTER_INSTANCES=nitter.net,xcancel.com,nitter.privacyredirect.com,nitter.privacydev.net,nitter.poast.org,nitter.space,nitter.tiekoetter.com,lightbrd.com
 BASE_URL=https://your-domain.com       # Deployment root URL
 HMAC_SECRET=...                        # 64-char hex for URL signing (see below)
@@ -524,6 +544,15 @@ GRAFANA_DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.poo
                                        # Supabase session pooler (port 5432) for Grafana
 ```
 
+**Choosing `X_POST_CHAR_LIMIT`:**
+
+- This single setting controls tweet length.
+- Set it to the full X composer limit for the account, not the visible prompt budget.
+- Use `280` for free/non-Premium standard posting.
+- Use a higher value such as `25000` only for Premium longer-post accounts that intentionally want long drafts.
+- PostPilot subtracts hidden fingerprint overhead automatically. With `X_POST_CHAR_LIMIT=280`, the visible target is 247 characters because 33 characters are reserved for tracking.
+- Drafts are fitted to the visible budget before scoring/coherence. If the server safety trim still fires before adding the fingerprint, it re-runs scoring/coherence before saving the draft.
+
 Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex). Run this command **separately for each variable** and paste two different values; do not reuse the same secret for both:
 
 ```bash
@@ -538,13 +567,14 @@ node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
 
 `INTERNAL_API_KEY` is required in the `X-API-Key` header for `/api/generate`, `/api/cron/generate`, `/api/status`, `/api/analytics`, `/api/status/:id/timeline`, and `/api/admin/*` requests.
 
-**Register the Telegram webhook** — without this, active callback buttons such as ✅ Posted never reach the server and Telegram buttons can appear stuck. Paste into a browser address bar (or `curl`), replacing `<TOKEN>` / `<BASE_URL>` / `<TELEGRAM_WEBHOOK_SECRET>` with your values:
+**Register the Telegram webhook** — without this, active callback buttons such as ✅ Posted never reach the server.
+Paste the URL into a browser or `curl`, replacing `<TOKEN>`, `<BASE_URL>`, and `<TELEGRAM_WEBHOOK_SECRET>`.
 
 ```
 https://api.telegram.org/bot<TOKEN>/setWebhook?url=<BASE_URL>/api/telegram/webhook&secret_token=<TELEGRAM_WEBHOOK_SECRET>
 ```
 
-Expect `{"ok":true,"result":true,"description":"Webhook was set"}`. Verify anytime with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`. The `secret_token` is checked on every incoming callback — mismatch returns `403` and the button click is rejected.
+Expect `{"ok":true,"result":true,"description":"Webhook was set"}`. Verify with `https://api.telegram.org/bot<TOKEN>/getWebhookInfo`. Every callback checks `secret_token`; mismatch returns `403`.
 
 <a id="3-set-up-the-database"></a>
 
@@ -570,7 +600,7 @@ npx prisma generate
 
 2.  **Get Chat ID**: Message [@userinfobot](https://t.me/userinfobot) and send `/start` to get your numeric Chat ID.
 
-3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` and the numeric Chat ID as `TELEGRAM_CHAT_ID` in your `.env` or Render variables. `TELEGRAM_CHAT_ID` is used for bot-initiated alerts (e.g. `RESOLVE_FAILED`, rate-limit warnings) that originate from the server rather than as a reply to a user message.
+3.  **Add to Environment**: Paste the token as `TELEGRAM_BOT_TOKEN` and the numeric chat ID as `TELEGRAM_CHAT_ID`. `TELEGRAM_CHAT_ID` is used for bot-initiated alerts like `RESOLVE_FAILED` and rate-limit warnings.
 
 <a id="5-configure-cloudflare-worker-cron"></a>
 
@@ -578,9 +608,13 @@ npx prisma generate
 
 PostPilot uses **Cloudflare Worker Cron** for scheduling.
 
-The Worker calls the protected `POST /api/cron/generate` endpoint on your Render app. PostPilot stores a unique `scheduled_slot_key` per UTC day/slot, so Cloudflare retries and Render cold-start repeats do not create duplicate scheduled drafts. Finished drafts are sent directly from PostPilot to Telegram.
+The Worker calls protected `POST /api/cron/generate` on Render.
+PostPilot stores a unique `scheduled_slot_key` per UTC day/slot, so retries and cold-start repeats do not create duplicate drafts.
+Finished drafts go directly to Telegram.
 
-The cron Worker posts directly to `/api/cron/generate` and lets the app handle async generation. It intentionally does **not** run a blocking warm-up GET or fixed pre-generation sleep; UptimeRobot already keeps the Render root URL warm every 5 minutes, and blocking Worker-side warm-ups can hide cron delivery failures.
+The cron Worker posts directly to `/api/cron/generate` and lets the app handle async generation.
+It does **not** run a blocking warm-up GET or fixed pre-generation sleep.
+UptimeRobot already warms `/` every 5 minutes, and Worker-side warm-ups can hide cron delivery failures.
 
 The included schedule is:
 
@@ -608,7 +642,8 @@ cd /path/to/PostPilot/cloudflare
 cp wrangler.toml.example wrangler.toml
 ```
 
-`cloudflare/wrangler.toml` is local deploy config. Keep it untracked; commit `cloudflare/wrangler.toml.example` instead. Because this Worker is deployed with Wrangler, treat `cloudflare/wrangler.toml` as the source of truth for the real deployed schedule and observability settings; dashboard changes should be copied back into `wrangler.toml` and `wrangler.toml.example` before the next deploy.
+`cloudflare/wrangler.toml` is local deploy config. Keep it untracked; commit `cloudflare/wrangler.toml.example` instead.
+Wrangler deploys from the local file, so copy dashboard schedule/observability changes back into `wrangler.toml` and the example before the next deploy.
 
 Log in to Cloudflare.
 
@@ -646,7 +681,7 @@ npx wrangler secret put POSTPILOT_INTERNAL_API_KEY
 npx wrangler secret put POSTPILOT_MANUAL_TRIGGER_TOKEN
 ```
 
-On Windows PowerShell, if copy-paste behaves oddly in the interactive secret prompt, type the value manually. This matters especially for `POSTPILOT_BASE_URL`; a bad paste can store corrupted text and the Worker will later fail with an invalid URL. You can also avoid the interactive prompt by piping the value.
+On Windows PowerShell, type secrets manually if copy-paste behaves oddly in the prompt. This matters for `POSTPILOT_BASE_URL`; a bad paste can store a corrupt URL. You can also pipe the value to avoid the prompt.
 
 Windows PowerShell:
 
@@ -744,7 +779,7 @@ https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/afternoon
 https://<worker-url>/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/night
 ```
 
-During the first `wrangler deploy`, Cloudflare may ask you to choose a `workers.dev` subdomain. Put that chosen subdomain where this guide shows `example-user`. For example, if Cloudflare gives you `https://postpilot-cron.example-user.workers.dev`, the bookmark formats are:
+During the first `wrangler deploy`, Cloudflare may ask for a `workers.dev` subdomain. Use that chosen subdomain wherever this guide shows `example-user`. For example:
 
 ```text
 Morning: https://postpilot-cron.example-user.workers.dev/manual/<POSTPILOT_MANUAL_TRIGGER_TOKEN>/morning
@@ -845,7 +880,9 @@ PostPilot manual trigger failed
 
 If a manual trigger returns `Unauthorized`, your URL token does not match `POSTPILOT_MANUAL_TRIGGER_TOKEN`. If the Worker logs `HTTP 401`, `POSTPILOT_INTERNAL_API_KEY` does not match Render's `INTERNAL_API_KEY`.
 
-Do not manage the production schedule only from the Cloudflare dashboard. Wrangler deploys replace the active Worker configuration with the local `cloudflare/wrangler.toml` settings, so schedule, observability, and route changes must live in `wrangler.toml` first, then be mirrored into `wrangler.toml.example` for future setup safety.
+Do not manage the production schedule only from the Cloudflare dashboard.
+Wrangler deploys replace active Worker config from local `cloudflare/wrangler.toml`.
+Keep schedule, observability, and route changes there first, then mirror them into the example.
 
 #### Changing schedule or timezone
 
@@ -905,7 +942,9 @@ https://<your-app-name>.onrender.com/
 Do not point UptimeRobot at `/api/cron/generate`, `/api/generate`, or any database health endpoint.
 
 > [!IMPORTANT]
-> With a baseline of 3 LLM calls per tweet (up to 4 if a diversity re-roll is triggered), three scheduled posts consume roughly 9-12 calls/day. One additional call is reserved daily for persona evolution. Keep `src/rateGuard.ts` aligned with the real provider quota before increasing this schedule.
+> Baseline cost is 3 LLM calls per tweet, or up to 4 with a diversity re-roll.
+> Three scheduled posts use roughly 9-12 calls/day. One more call is reserved for persona evolution.
+> Keep `src/rateGuard.ts` aligned with the real quota before increasing the schedule.
 
 ### Increasing RPM / RPD Limits
 
@@ -917,38 +956,48 @@ const RPM_LIMIT = 5;      // bump to your tier's RPM
 const RPD_LIMIT = 19;     // bump to your tier's RPD
 ```
 
-When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts), marks the tweet `GENERATION_RATE_LIMITED`, and sends a Telegram warning instead of a junk draft. Note: the guard counts all models in one bucket; actual per-model 429s are handled by the LangChain fallback chain.
+When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts).
+It marks the tweet `GENERATION_RATE_LIMITED` and sends a Telegram warning instead of a junk draft.
+The guard counts all models in one bucket; LangChain fallbacks handle provider-side per-model 429s.
 
 
 <a id="database-stability"></a>
 
 ## 🛡️ Database Stability
 
-PostPilot runs in **small-pool mode** (`connection_limit=5`) with **explicit sequential query loading** in `contextLoader` and due-task worker scheduling. The workload is ~3 generations/day, but real overlap still happens when `/api/generate`, worker resolution, Telegram callbacks, status/admin checks, and background agent reads land in the same minute.
+PostPilot runs in **small-pool mode** (`connection_limit=5`).
+`contextLoader` uses explicit sequential DB reads, and the worker schedules around due tasks.
+The workload is small, but generation, resolver work, Telegram callbacks, admin/status checks, and agent reads can still overlap.
 
 **How it works** (see [`src/db.ts`](src/db.ts), [`src/agent.ts`](src/agent.ts) `contextLoader`):
 
 1. **Connection-string params** — `connection_limit=5`, `pool_timeout=60`, `connect_timeout=30`, `tcp_keepalives_*`. All required; see the `.env` example in [Configure environment](#2-configure-environment).
-2. **Retry-once middleware** — on `P1001 / P1002 / P1008 / P1017` or `"Can't reach database" / "Server has closed" / ECONNREFUSED / ETIMEDOUT`, waits 1.5s and retries the query once. The Prisma engine reconnects transparently on the retry call — no manual `$disconnect()` (which would nuke the only connection and block every other caller).
+2. **Retry-once middleware** — on reconnectable Prisma/network errors, waits 1.5s and retries once. Prisma reconnects on the retry call. Do not call `$disconnect()` here; it can tear down the shared pool.
 3. **`ensureDbReady()`** — probes with one retry before `contextLoader`'s query sequence, so a cold socket reconnects on one probe rather than on the first real query.
-4. **Sequential loading in `contextLoader`** — the DB-touching reads run as explicit `await`s instead of `Promise.all`. Even with a small pool, unbounded fake parallelism can occupy every slot during a slow DB/network window. Explicit sequencing bounds any single-query stall to that one query. The non-DB `getTrendingTopics()` scrape still overlaps the DB sequence — it doesn't touch the socket.
-5. **Due-task worker scheduling** — `src/worker.ts` sleeps until the earliest pending `RetryQueue.process_after`, with a 15-minute idle reconciliation cap. `enqueueRetry()` wakes the scheduler immediately for newly queued work. The hot lookup is backed by `@@index([status, process_after, created_at])`.
+4. **Sequential loading in `contextLoader`** — DB reads use explicit `await`s instead of `Promise.all`. This keeps slow windows from occupying every pool slot. Trends still overlaps because it does not use the socket.
+5. **Due-task worker scheduling** — `src/worker.ts` sleeps until the earliest pending `RetryQueue.process_after`. Idle reconciliation is capped at 15 minutes, and `enqueueRetry()` wakes it immediately.
 
 `canCallLLM()` also fails **open** on DB error so a transient blip never blocks generation.
 
 **Wall-clock impact:** `contextLoader` runs ~400–500ms total (was ~350ms in serialized-Promise.all mode, ~80ms on a real pool). Invisible against the Cloudflare Worker retry window.
 
-**Log-level discipline:** middleware retries log at `WARN` (normal recovery, not an alarm). The worker's per-tick connection failures also log at `WARN`. The only `ERROR`/`CRITICAL` line is the one inside `scheduledWorkerTick` that fires after **5 consecutive** connection failures — i.e. "DB has been unreachable for ~5 minutes, something is actually wrong." That's the one line worth paging on. See [Worker & Logging](#-background-workers).
+**Log-level discipline:** middleware retries log at `WARN`, which means normal recovery.
+Worker connection failures also start at `WARN`.
+The `ERROR`/`CRITICAL` path only fires after **5 consecutive** worker failures, meaning the DB has been unreachable for about 5 minutes.
+That is the line worth paging on. See [Worker & Logging](#-background-workers).
 
 ### Keeping logs quiet
 
-Supavisor on free tier drops idle sockets after ~5 min. The middleware in `src/db.ts` reconnects transparently on the next real query, logging a single `WARN`. A prior `/health/db` keepalive endpoint was removed: during cross-region network flaps it competed with real work for the single pool slot (45s hangs), made UptimeRobot report the service DOWN during recoverable blips, and added more noise than it saved.
+Supavisor on free tier drops idle sockets after about 5 minutes.
+`src/db.ts` reconnects on the next real query and logs one `WARN`.
+The old `/health/db` keepalive was removed because it competed with real work and made recoverable blips look like downtime.
 
-The worker no longer polls every 60s while idle. It sleeps until the next due `RetryQueue` task, or at most 15 minutes when the queue is empty. Single connection failures stay quiet; WARN logs start after 3 consecutive worker DB failures and CRITICAL logs remain reserved for 5 consecutive failures.
+The worker no longer polls every 60s while idle. It sleeps until the next due task, or at most 15 minutes when empty. Single connection failures stay quiet; WARN starts after 3 consecutive failures and CRITICAL after 5.
 
-Migration `20260427000000_add_retry_queue_due_index` has been applied to Supabase. Verification surface: `prisma migrate status` should report `Database schema is up to date!`, and Postgres should have `RetryQueue_status_process_after_created_at_idx`.
+Migration `20260427000000_add_retry_queue_due_index` has been applied to Supabase. Verify with `prisma migrate status`; Postgres should also have `RetryQueue_status_process_after_created_at_idx`.
 
-> If Render still has `connection_limit=1` or `connection_limit=3`, update only that query parameter to `connection_limit=5` and redeploy. Keep `pool_timeout=60`, `connect_timeout=30`, `pgbouncer=true`, and the TCP keepalive params unchanged.
+> If Render still has `connection_limit=1` or `connection_limit=3`, update only that query parameter to `connection_limit=5` and redeploy.
+> Keep `pool_timeout=60`, `connect_timeout=30`, `pgbouncer=true`, and the TCP keepalive params unchanged.
 
 ### Troubleshooting: `P1001` on port **5432** during deploy
 
@@ -1031,7 +1080,7 @@ PostPilot is optimized for the **Render Free Tier**, utilizing a monolith archit
 3. **Start Command**: `npm start` (runs migrations, then starts the server + in-process worker).
 4. **Dashboard Release Command**: run `npm run release` when you want to apply migrations and dashboard changes without starting the web service.
 5. **Environment Variables**:
-   - `DATABASE_URL`: Transaction Pooler (Port 6543) + full stability params — see the `.env` example in [Configure environment](#2-configure-environment). Key value: `connection_limit=5` + `pool_timeout=60` and all five `tcp_keepalives_*` / `connect_timeout` params are required. See [Database Stability](#database-stability) for why small-pool mode.
+   - `DATABASE_URL`: Transaction Pooler on port 6543 with full stability params. Required values include `connection_limit=5`, `pool_timeout=60`, all five `tcp_keepalives_*` params, and `connect_timeout`.
 
    - `DIRECT_URL`: Session Pooler (Port 5432) for migrations; no `pgbouncer=true` query param. Username must be `postgres.PROJECT_REF`.
 
@@ -1051,7 +1100,7 @@ Render's free tier sleeps after 15 minutes of inactivity. A single monitor keeps
 6. **Monitoring Interval**: Every `5 minutes`.
 7. Click **Create Monitor**.
 
-> Do **not** add a second monitor against `/health/db` — that endpoint was removed. During cross-region Supavisor flaps it held the single Prisma slot for 45s and made UptimeRobot report the service as DOWN during recoverable blips.
+> Do **not** add a second monitor against `/health/db`; that endpoint was removed. During Supavisor flaps it held a Prisma slot for 45s and made recoverable blips look like downtime.
 
 ### Railway (Alternative)
 
@@ -1074,35 +1123,36 @@ If you prefer Railway, you can deploy as a single service using `npm start` or a
 
 ## 🛡️ Safety & Policy Compliance
 
-PostPilot is designed as a **Safety-First Autonomous Agent**. Unlike traditional bots that risk account suspension through aggressive API automation, PostPilot prioritizes long-term account safety via four key strategies:
+PostPilot is designed as a **Safety-First Autonomous Agent**. It avoids aggressive API automation and prioritizes long-term account safety through four strategies:
 
 - **Human-in-the-Loop (HITL)**: AI drafts, you post. No account credentials ever handed to an automated script — you stay a regular user in X's eyes.
 
-- **Layered Resolution**: Zero-width Unicode (`U+200B`/`U+200C`) fingerprints, tolerant truncated-fingerprint matching, and visible-text fallback link drafts to engagement without using the Official X API or visible tracking IDs.
+- **Layered Resolution**: Zero-width fingerprints, truncated-fingerprint matching, and visible-text fallback link drafts to engagement without the Official X API or visible tracking IDs.
 
 - **Decoupled Data Collection**: Tracking via publicly available data sources and syndication endpoints. Your account is never used to scrape, so tracking rate-limits never touch your handle.
 
-- **Content Diversity Gate**: Dual-layer check (trigram Jaccard + FORMAT-prefixed structural fingerprint) plus LRU rotation across 8 format archetypes with hard banned-opening lists. Survives Render restarts via heuristic format-map backfill (no schema migration). Protects against shadowbans and same-shape pattern decay.
+- **Content Diversity Gate**: Trigram similarity, FORMAT-prefixed structural fingerprints, and LRU rotation protect against same-shape repetition. Heuristic backfill survives Render restarts without a schema migration.
 
 <a id="hard-constraints"></a>
 
 ## ⚖️ Hard Constraints
 
-- **Max 3 LLM calls** per tweet generation in the happy path (contentGenerator, qualityScorer, autoRefiner-conditional). Worst case 4 with a diversity re-roll (single extra `contentGenerator` call).
+- **Typical 2-3 LLM calls** per tweet generation (contentGenerator, qualityScorer, autoRefiner when needed). Worst case is usually 4 with a diversity re-roll; a failed post-refiner validation can use one extra refiner call. A rare server safety trim can add one scorer call before persistence.
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
-- **Google AI Studio limits:** current app-side guard is 5 RPM / 19 RPD in `src/rateGuard.ts`. Keep those constants aligned with the actual quota for the active Google AI tier/model. When exhausted, the agent graph **short-circuits** at `contentGenerator` — no garbage fallback draft is shipped to Telegram; the tweet is marked `GENERATION_RATE_LIMITED` and a Telegram warning is sent instead. See [Increasing RPM / RPD Limits](#increasing-rpm--rpd-limits).
+- **Google AI Studio limits:** the app-side guard is 5 RPM / 19 RPD in `src/rateGuard.ts`. Keep these constants aligned with the active Google tier/model. When exhausted, the graph stops at `contentGenerator`.
 
-- **Data-Driven Analysis**: The analytical heavy-lifting—scoring engagement, weighting feedback, and tracking trends—is handled via pure math (zero LLM calls). This maximizes budget efficiency by reserving LLM power for the final **Persona Evolution** step, where data is synthesized into new personality traits.
+- **Data-Driven Analysis**: Engagement scoring, feedback weighting, and trend tracking use pure math. LLM budget is reserved for draft generation and persona evolution.
 
-- **LangGraph pipeline shape:** `contextLoader → personaAdapter → contentGenerator → diversityGate → qualityScorer → coherenceGate → [autoRefiner if score<8 OR coherence failed] → finalTopicMemory → END`. Re-roll edge: `diversityGate → personaAdapter → contentGenerator` (capped at 1; new format archetype + rejected fingerprint injected into the retry prompt). The route back is keyed to active `rejectedFingerprint` state, not `rerollCount` alone, so a passed re-roll cannot loop and burn the 5 RPM budget.
+- **LangGraph pipeline shape:** `contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> autoRefiner? -> postRefinerGate? -> finalTopicMemory -> END`.
+  Re-rolls go through `diversityGate -> personaAdapter -> contentGenerator`, capped at one retry.
 
 <a id="contributing"></a>
 
 ## Contributing
 
-Contributions, feature ideas, and bug reports are welcome. Open an issue for bugs, setup friction, feature requests, or questions about the automation flow. For bug reports, include the command or endpoint you ran, expected vs actual behavior, and any safe-to-share logs or screenshots.
+Contributions, feature ideas, and bug reports are welcome. Open an issue for bugs, setup friction, feature requests, or automation-flow questions. For bugs, include expected vs actual behavior and safe logs.
 
 If you want to build a feature, please open an issue first so the approach can stay aligned with PostPilot's safety, rate-limit, and human-in-the-loop posting model.
 

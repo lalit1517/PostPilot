@@ -37,6 +37,9 @@ let consecutiveDbFailures = 0;
 // In-memory queue to prevent overlapping polls
 const activePolls = new Set<string>();
 
+const TELEGRAM_EDIT_TIMEOUT_MS = 10_000;
+const TELEGRAM_FINAL_STATUS_RETRIES = 3;
+
 const DEFAULT_NITTER_INSTANCES = [
   'nitter.net',
   'xcancel.com',
@@ -53,6 +56,35 @@ const scraperCooldownUntil = new Map<string, number>();
 
 function getJitterDelay(baseDelayMs: number) {
   return baseDelayMs + Math.floor(Math.random() * 2000);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function errorLogDetails(err: unknown): Record<string, unknown> {
+  if (!(err instanceof Error)) return { err: String(err) };
+
+  const details: Record<string, unknown> = {
+    err: err.message,
+    name: err.name,
+  };
+
+  const cause = (err as Error & { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    details.cause = cause.message;
+    details.causeName = cause.name;
+  } else if (cause && typeof cause === 'object') {
+    const c = cause as Record<string, unknown>;
+    if (typeof c.message === 'string') details.cause = c.message;
+    if (typeof c.code === 'string') details.causeCode = c.code;
+    if (typeof c.errno === 'number') details.causeErrno = c.errno;
+    if (typeof c.syscall === 'string') details.causeSyscall = c.syscall;
+    if (typeof c.hostname === 'string') details.causeHostname = c.hostname;
+    if (typeof c.port === 'number') details.causePort = c.port;
+  }
+
+  return details;
 }
 
 function normalizeNitterHost(rawHost: string): string | null {
@@ -140,24 +172,44 @@ async function updateTelegramFinalStatus(
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   if (!botToken) return;
 
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        message_id: messageId,
-        text,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: [] },
-      }),
-    });
-    if (!res.ok) {
+  for (let attempt = 1; attempt <= TELEGRAM_FINAL_STATUS_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(TELEGRAM_EDIT_TIMEOUT_MS),
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+          text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] },
+        }),
+      });
+
+      if (res.ok) return;
+
       const body = await res.text();
-      logger.warn({ tweetId, status: res.status, body }, 'Telegram final status update returned non-OK');
+      const retryable = attempt < TELEGRAM_FINAL_STATUS_RETRIES && (res.status === 429 || res.status >= 500);
+      logger.warn(
+        { tweetId, status: res.status, body, attempt, retryable },
+        retryable
+          ? 'Telegram final status update returned non-OK; retrying'
+          : 'Telegram final status update returned non-OK',
+      );
+      if (!retryable) return;
+    } catch (err) {
+      const retryable = attempt < TELEGRAM_FINAL_STATUS_RETRIES;
+      logger.warn(
+        { tweetId, attempt, retryable, ...errorLogDetails(err) },
+        retryable
+          ? 'Telegram final status update fetch failed; retrying'
+          : 'Failed to update Telegram final status',
+      );
+      if (!retryable) return;
     }
-  } catch (err) {
-    logger.warn({ tweetId, err: (err as Error).message }, 'Failed to update Telegram final status');
+
+    await sleep(getJitterDelay(1000 * attempt));
   }
 }
 

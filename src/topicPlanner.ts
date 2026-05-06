@@ -47,6 +47,7 @@ export interface PlanTopicInput {
   trendingTopics: string[];
   recentTopics: string[];
   topicBlacklist: string[];
+  forceRequestedTopic?: boolean;
 }
 
 interface TopicCandidate {
@@ -417,7 +418,7 @@ export function planTopic(input: PlanTopicInput): TopicPlan {
   const requestedTopic = input.requestedTopic.trim();
   const trendData = buildCandidates(input.trendingTopics);
 
-  if (requestedTopic && !isBlockedTopic(requestedTopic, recentSet, blacklistSet)) {
+  if (requestedTopic && (input.forceRequestedTopic || !isBlockedTopic(requestedTopic, recentSet, blacklistSet))) {
     const classified = classifyTrend(requestedTopic);
     const lane = inferTopicLane(requestedTopic);
     return {
@@ -429,7 +430,7 @@ export function planTopic(input: PlanTopicInput): TopicPlan {
         ? 'User supplied this topic. Keep the draft grounded in the topic while making it sound like the owner.'
         : 'User supplied this topic. Keep the draft grounded in the topic with a practical tech/dev angle.',
       needsNewsContext: classified.needsNewsContext,
-      reason: 'explicit_generation_topic',
+      reason: input.forceRequestedTopic ? 'explicit_user_topic_forced' : 'explicit_generation_topic',
       trendHints: trendData.trendHints,
       acceptedTrendCount: trendData.acceptedTrendCount,
       rejectedTrendCount: trendData.rejectedTrendCount,
