@@ -347,6 +347,22 @@ async function processGenerationInBackground(
       return;
     }
 
+    if (finalState.validationFailed) {
+      logger.error(
+        {
+          tweetId,
+          reason: finalState.coherenceReason,
+          iterationCount: finalState.iterationCount,
+        },
+        "Generation failed validation after refinement",
+      );
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: "ERROR" },
+      });
+      return;
+    }
+
     if (!tweetDraft) throw new Error("Agent failed to generate draft");
 
     const currentTweet = await prisma.tweet.findUnique({

@@ -60,7 +60,7 @@ export function appendFingerprint(content: string, invisibleFingerprint: string)
  * Useful when reusing a prior draft as LLM context.
  */
 export function stripInvisibleFingerprint(content: string): string {
-  return (content ?? '').replace(/[\u200B\u200C]+/g, '').trim();
+  return (content ?? '').replace(/[ \t]*[\u200B\u200C]{28,32}$/u, '').trimEnd();
 }
 
 /**

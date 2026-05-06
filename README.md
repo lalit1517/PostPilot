@@ -85,7 +85,7 @@ Cloudflare Cron           Telegram (notifications)
 
 1. **Orchestration** — Cloudflare Worker Cron triggers `/api/cron/generate` at 09:00, 13:30, and 22:00 IST. PostPilot sends Telegram draft notifications directly with inline buttons (post, edit, feedback).
 
-2. **Intelligence** — LangGraph StateGraph with 7 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner). Gemini 2.5 Flash primary, with fallback chain.
+2. **Intelligence** — LangGraph StateGraph with 8 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner, postRefinerGate). Gemini 2.5 Flash primary, with fallback chain.
 
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution) using due-task scheduling instead of fixed idle polling.
 
@@ -97,7 +97,7 @@ Cloudflare Cron           Telegram (notifications)
 PostPilot improves its own writing over time without manual tuning.
 
 ```
-Generation (3 LLM calls max)
+Generation (2-3 LLM calls typical)
   -> contextLoader pulls slot-aware exemplars (top tweets at THIS time-of-day)
   -> qualityScorer returns quality_score (1.0-10.0, 1 dp); server persists it to the new TweetVersion
   -> Engagement tracked at 10m, 1h, 6h, 24h, 48h, 72h (likes + retweets + replies)
@@ -135,7 +135,7 @@ Generation (3 LLM calls max)
 
 ## 🧠 AI Agent (LangGraph)
 
-**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner if needed] -> finalTopicMemory -> END`
+**Pipeline:** `START -> contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> [autoRefiner -> postRefinerGate if needed] -> finalTopicMemory -> END`
 
 **Re-roll edge:** `diversityGate -> personaAdapter` is capped at one retry.
 A rejected draft gets a new format, and its rejected fingerprint/text are saved to state.
@@ -155,7 +155,8 @@ The tweet becomes `GENERATION_RATE_LIMITED`, and Telegram receives a warning.
 | `qualityScorer` | Yes | Scores 1.0-10.0 with one decimal, applies structural and revision penalties, parses fixed critique hints, and returns the score for `server.ts` to persist. |
 | `coherenceGate` | No | Checks feedback compliance and topic coherence without LLM. User-supplied topics require direct overlap; failures lower high scores and add `topic_drift` / `feedback_drift` for refinement. |
 | `autoRefiner` | Conditional | Rewrites when score is low, coherence/revision fails, or draft is too long. Reuses prompt constraints; suspicious rewrites are rejected, and server-side trimming handles final length overshoots. |
-| `finalTopicMemory` | No | Records the accepted final topic into the 48h cooldown after both direct and refined paths. |
+| `postRefinerGate` | No | Re-runs revision and topic checks on refined drafts. Valid drafts continue; one failed validation can retry refinement, then fails closed. |
+| `finalTopicMemory` | No | Records the accepted final topic into the 48h cooldown after the direct path or a validated refined path. |
 
 
 **Owner Identity (`OWNER_PROFILE`)**: [`src/config/ownerProfile.ts`](src/config/ownerProfile.ts) is the runtime contract.
@@ -1136,7 +1137,7 @@ PostPilot is designed as a **Safety-First Autonomous Agent**. It avoids aggressi
 
 ## ⚖️ Hard Constraints
 
-- **Max 3 LLM calls** per tweet generation in the happy path (contentGenerator, qualityScorer, autoRefiner-conditional). Worst case 4 with a diversity re-roll (single extra `contentGenerator` call).
+- **Typical 2-3 LLM calls** per tweet generation (contentGenerator, qualityScorer, autoRefiner when needed). Worst case is usually 4 with a diversity re-roll; a failed post-refiner validation can use one extra refiner call.
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
@@ -1144,7 +1145,7 @@ PostPilot is designed as a **Safety-First Autonomous Agent**. It avoids aggressi
 
 - **Data-Driven Analysis**: Engagement scoring, feedback weighting, and trend tracking use pure math. LLM budget is reserved for draft generation and persona evolution.
 
-- **LangGraph pipeline shape:** `contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> autoRefiner? -> finalTopicMemory -> END`.
+- **LangGraph pipeline shape:** `contextLoader -> personaAdapter -> contentGenerator -> diversityGate -> qualityScorer -> coherenceGate -> autoRefiner? -> postRefinerGate? -> finalTopicMemory -> END`.
   Re-rolls go through `diversityGate -> personaAdapter -> contentGenerator`, capped at one retry.
 
 <a id="contributing"></a>

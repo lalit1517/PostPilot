@@ -61,6 +61,7 @@ const AgentState = Annotation.Root({
   rejectedFingerprint: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   rejectedDraft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   rateLimited: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
+  validationFailed: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
 });
 
 const baseConfig = {
@@ -259,6 +260,53 @@ function checkRevisionCompliance(
   }
 
   return { compliant: true, reason: 'revision_feedback_satisfied', missingAnchors: [] };
+}
+
+type DraftContextValidation =
+  | { ok: true; reason: string; overlap: string[]; domainMatches: string[] }
+  | {
+      ok: false;
+      kind: 'revision';
+      reason: string;
+      missingAnchors: string[];
+    }
+  | {
+      ok: false;
+      kind: 'topic';
+      reason: string;
+      topicKeywords: string[];
+    };
+
+function validateDraftContext(draft: string, state: typeof AgentState.State): DraftContextValidation {
+  const revisionResult = checkRevisionCompliance(draft, state.previousDraft, state.currentFeedback);
+  if (!revisionResult.compliant) {
+    return {
+      ok: false,
+      kind: 'revision',
+      reason: revisionResult.reason,
+      missingAnchors: revisionResult.missingAnchors,
+    };
+  }
+
+  const strictUserTopic = state.forceTopic || state.topicPlan?.source === 'user_supplied';
+  const topicResult = checkTopicCoherence(draft, state.topic, {
+    allowDomainPivot: !strictUserTopic,
+  });
+  if (!topicResult.coherent) {
+    return {
+      ok: false,
+      kind: 'topic',
+      reason: topicResult.reason,
+      topicKeywords: topicResult.topicKeywords,
+    };
+  }
+
+  return {
+    ok: true,
+    reason: topicResult.reason,
+    overlap: topicResult.overlappingKeywords,
+    domainMatches: topicResult.domainMatches,
+  };
 }
 
 function isSuspiciousDraft(draft: string): string | null {
@@ -1009,47 +1057,44 @@ This is a feedback regeneration. Deduct 4 points if the tweet ignores the feedba
 
 // Graph node — topic/content coherence check. Pure string, no LLM call.
 async function coherenceGate(state: typeof AgentState.State) {
-  const revisionResult = checkRevisionCompliance(state.draft, state.previousDraft, state.currentFeedback);
-  if (!revisionResult.compliant) {
+  const validation = validateDraftContext(state.draft, state);
+  if (!validation.ok && validation.kind === 'revision') {
     logger.warn({
       topic: state.topic,
-      reason: revisionResult.reason,
-      missingAnchors: revisionResult.missingAnchors,
+      reason: validation.reason,
+      missingAnchors: validation.missingAnchors,
       draftPreview: state.draft.slice(0, 80),
     }, "Revision compliance gate: draft did not satisfy feedback context");
 
     const nudgedScore = state.score >= 8 ? 6 : state.score;
     const nudgedHints = Array.from(new Set([...(state.critiqueHints ?? []), 'feedback_drift']));
-    const critiqueSuffix = `Revision compliance failed: ${revisionResult.reason}${revisionResult.missingAnchors.length > 0 ? ` (${revisionResult.missingAnchors.join(', ')})` : ''}.`;
+    const critiqueSuffix = `Revision compliance failed: ${validation.reason}${validation.missingAnchors.length > 0 ? ` (${validation.missingAnchors.join(', ')})` : ''}.`;
     return {
       coherent: false,
-      coherenceReason: revisionResult.reason,
+      coherenceReason: validation.reason,
       score: nudgedScore,
       critique: [state.critique, critiqueSuffix].filter(Boolean).join(' '),
       critiqueHints: nudgedHints,
+      validationFailed: false,
     };
   }
 
-  const strictUserTopic = state.forceTopic || state.topicPlan?.source === 'user_supplied';
-  const result = checkTopicCoherence(state.draft, state.topic, {
-    allowDomainPivot: !strictUserTopic,
-  });
-  if (result.coherent) {
+  if (validation.ok) {
     resetCoherenceFailure(state.topic);
     logger.info({
-      reason: result.reason,
-      overlap: result.overlappingKeywords,
-      domainMatches: result.domainMatches,
+      reason: validation.reason,
+      overlap: validation.overlap,
+      domainMatches: validation.domainMatches,
     }, "Coherence gate passed");
-    return { coherent: true, coherenceReason: result.reason };
+    return { coherent: true, coherenceReason: validation.reason, validationFailed: false };
   }
 
   const failureCount = incrementCoherenceFailure(state.topic);
   logger.warn({
     topic: state.topic,
     draftPreview: state.draft.slice(0, 80),
-    reason: result.reason,
-    topicKeywords: result.topicKeywords,
+    reason: validation.reason,
+    topicKeywords: validation.topicKeywords,
     failureCount,
   }, "Coherence gate: topic-content mismatch");
 
@@ -1064,9 +1109,10 @@ async function coherenceGate(state: typeof AgentState.State) {
   const nudgedHints = Array.from(new Set([...(state.critiqueHints ?? []), 'topic_drift']));
   return {
     coherent: false,
-    coherenceReason: result.reason,
+    coherenceReason: validation.reason,
     score: nudgedScore,
     critiqueHints: nudgedHints,
+    validationFailed: false,
   };
 }
 
@@ -1108,7 +1154,7 @@ async function autoRefiner(state: typeof AgentState.State) {
     const { allowed, reason } = await canCallLLM();
     if (!allowed) {
       logger.warn({ reason }, "LLM rate limit reached in autoRefiner, keeping original draft");
-      return { draft: state.draft, iterationCount: 2 };
+      return { draft: state.draft, iterationCount: state.iterationCount + 1 };
     }
     await recordLLMCall("gemini-2.5-flash", "refine");
 
@@ -1117,14 +1163,48 @@ async function autoRefiner(state: typeof AgentState.State) {
     const rejectReason = isSuspiciousDraft(refined);
     if (rejectReason) {
       logger.warn({ rejectReason, refinedLen: refined.length, originalLen: state.draft.length }, "Refined draft rejected by heuristic. Keeping original.");
-      return { draft: state.draft, iterationCount: 2 };
+      return { draft: state.draft, iterationCount: state.iterationCount + 1 };
     }
     logger.info({ refinedLen: refined.length }, "Refined draft accepted");
-    return { draft: refined, iterationCount: 2 };
+    return { draft: refined, iterationCount: state.iterationCount + 1 };
   } catch (err) {
     logger.warn("Auto Refiner timed out. Using original draft.");
-    return { draft: state.draft, iterationCount: 2 };
+    return { draft: state.draft, iterationCount: state.iterationCount + 1 };
   }
+}
+
+function postRefinerGate(state: typeof AgentState.State) {
+  const validation = validateDraftContext(state.draft, state);
+  if (validation.ok) {
+    resetCoherenceFailure(state.topic);
+    logger.info({
+      reason: validation.reason,
+      overlap: validation.overlap,
+      domainMatches: validation.domainMatches,
+      iterationCount: state.iterationCount,
+    }, "Post-refiner validation passed");
+    return { coherent: true, coherenceReason: validation.reason, validationFailed: false };
+  }
+
+  const hint = validation.kind === 'revision' ? 'feedback_drift' : 'topic_drift';
+  const nudgedHints = Array.from(new Set([...(state.critiqueHints ?? []), hint]));
+  logger.warn({
+    topic: state.topic,
+    reason: validation.reason,
+    validationKind: validation.kind,
+    missingAnchors: validation.kind === 'revision' ? validation.missingAnchors : [],
+    topicKeywords: validation.kind === 'topic' ? validation.topicKeywords : [],
+    iterationCount: state.iterationCount,
+    draftPreview: state.draft.slice(0, 80),
+  }, "Post-refiner validation failed");
+
+  return {
+    coherent: false,
+    coherenceReason: validation.reason,
+    score: 6,
+    critiqueHints: nudgedHints,
+    validationFailed: state.iterationCount >= 2,
+  };
 }
 
 function finalTopicMemory(state: typeof AgentState.State) {
@@ -1151,6 +1231,19 @@ function shouldRefine(state: typeof AgentState.State): "autoRefiner" | "finalTop
   return "autoRefiner";
 }
 
+function afterPostRefinerGate(state: typeof AgentState.State): "autoRefiner" | "finalTopicMemory" | typeof END {
+  if (state.validationFailed) {
+    logger.warn({
+      topic: state.topic,
+      reason: state.coherenceReason,
+      iterationCount: state.iterationCount,
+    }, "Post-refiner validation failed after retry budget; ending without final topic memory");
+    return END;
+  }
+  if (state.coherent === false) return "autoRefiner";
+  return "finalTopicMemory";
+}
+
 const workflow = new StateGraph(AgentState)
   .addNode("contextLoader", contextLoader)
   .addNode("personaAdapter", personaAdapter)
@@ -1159,6 +1252,7 @@ const workflow = new StateGraph(AgentState)
   .addNode("qualityScorer", qualityScorer)
   .addNode("coherenceGate", coherenceGate)
   .addNode("autoRefiner", autoRefiner)
+  .addNode("postRefinerGate", postRefinerGate)
   .addNode("finalTopicMemory", finalTopicMemory)
 
   .addEdge(START, "contextLoader")
@@ -1168,7 +1262,8 @@ const workflow = new StateGraph(AgentState)
   .addConditionalEdges("diversityGate", afterDiversityGate)
   .addEdge("qualityScorer", "coherenceGate")
   .addConditionalEdges("coherenceGate", shouldRefine)
-  .addEdge("autoRefiner", "finalTopicMemory")
+  .addEdge("autoRefiner", "postRefinerGate")
+  .addConditionalEdges("postRefinerGate", afterPostRefinerGate)
   .addEdge("finalTopicMemory", END);
 
 export const agentGraph = workflow.compile();
