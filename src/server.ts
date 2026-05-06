@@ -8,7 +8,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
-import { agentGraph } from "./agent.js";
+import { agentGraph, coherenceGate, qualityScorer } from "./agent.js";
 import { generateUniqueFingerprint, appendFingerprint, stripInvisibleFingerprint } from "./fingerprint.js";
 import { fitVisibleDraftToLimit, getConfiguredXPostCharLimit, getPostLength, getVisibleDraftCharLimit, getVisibleLength } from "./postLimits.js";
 import { getRateStatus } from "./rateGuard.js";
@@ -406,9 +406,54 @@ async function processGenerationInBackground(
           visibleDraftLimit,
           xPostCharLimit: getConfiguredXPostCharLimit(),
           invisibleFingerprintLen: invisibleSuffix.length,
+          fitFunction: "fitVisibleDraftToLimit",
+          fingerprintFunction: "appendFingerprint",
+          scorerFunction: "qualityScorer",
+          coherenceFunction: "coherenceGate",
         },
-        "Generated draft exceeded visible budget; trimmed deterministically before fingerprinting",
+        "Post-agent visible-budget safety trim fired; re-running qualityScorer/coherenceGate before appendFingerprint",
       );
+
+      const rescored = await qualityScorer({ ...finalState, draft: tweetDraft });
+      Object.assign(finalState, rescored);
+
+      const recohered = await coherenceGate({ ...finalState, draft: tweetDraft });
+      Object.assign(finalState, recohered);
+
+      logger.warn(
+        {
+          tweetId,
+          score: finalState.score,
+          coherent: finalState.coherent,
+          coherenceReason: finalState.coherenceReason,
+          critiqueHints: finalState.critiqueHints,
+          scorerFunction: "qualityScorer",
+          coherenceFunction: "coherenceGate",
+          fitFunction: "fitVisibleDraftToLimit",
+          nextFunction: "appendFingerprint",
+        },
+        "Re-scored fitted draft before persistence and fingerprint append",
+      );
+
+      if (finalState.coherent === false || finalState.validationFailed) {
+        logger.error(
+          {
+            tweetId,
+            reason: finalState.coherenceReason,
+            validationFailed: finalState.validationFailed,
+            fitFunction: "fitVisibleDraftToLimit",
+            scorerFunction: "qualityScorer",
+            coherenceFunction: "coherenceGate",
+            skippedFunction: "appendFingerprint",
+          },
+          "Fitted draft failed re-scoring/coherence after post-agent trim",
+        );
+        await prisma.tweet.update({
+          where: { id: tweetId },
+          data: { status: "ERROR" },
+        });
+        return;
+      }
     }
 
     tweetDraft = appendFingerprint(tweetDraft, invisibleSuffix);
@@ -490,7 +535,6 @@ async function processGenerationInBackground(
         fullPostLen,
         xPostCharLimit,
         invisibleFingerprintLen: invisibleSuffix.length,
-        intentUrl: payload.intentUrl,
       },
       "Background generation finished. Prepared payload.",
     );

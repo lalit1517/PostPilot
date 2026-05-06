@@ -85,7 +85,7 @@ Cloudflare Cron           Telegram (notifications)
 
 1. **Orchestration** — Cloudflare Worker Cron triggers `/api/cron/generate` at 09:00, 13:30, and 22:00 IST. PostPilot sends Telegram draft notifications directly with inline buttons (post, edit, feedback).
 
-2. **Intelligence** — LangGraph StateGraph with 8 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner, postRefinerGate). Gemini 2.5 Flash primary, with fallback chain.
+2. **Intelligence** — LangGraph StateGraph with 9 nodes (contextLoader, personaAdapter, contentGenerator, diversityGate, qualityScorer, coherenceGate, autoRefiner, postRefinerGate, finalTopicMemory). Gemini 2.5 Flash primary, with fallback chain.
 
 3. **Persistence** — PostgreSQL via Prisma ORM on Supabase. RetryQueue manages async tasks (tweet resolution, engagement tracking, persona evolution) using due-task scheduling instead of fixed idle polling.
 
@@ -154,7 +154,7 @@ The tweet becomes `GENERATION_RATE_LIMITED`, and Telegram receives a warning.
 | `diversityGate` | No | Enforces trigram + structural diversity against recent drafts. On first duplicate, changes format and re-routes through `personaAdapter`; accepted drafts clear reject state and update fingerprint memory. |
 | `qualityScorer` | Yes | Scores 1.0-10.0 with one decimal, applies structural and revision penalties, parses fixed critique hints, and returns the score for `server.ts` to persist. |
 | `coherenceGate` | No | Checks feedback compliance and topic coherence without LLM. User-supplied topics require direct overlap; failures lower high scores and add `topic_drift` / `feedback_drift` for refinement. |
-| `autoRefiner` | Conditional | Rewrites when score is low, coherence/revision fails, or draft is too long. Reuses prompt constraints; suspicious rewrites are rejected, and server-side trimming handles final length overshoots. |
+| `autoRefiner` | Conditional | Rewrites when score is low, coherence/revision fails, or draft is too long. Reuses prompt constraints; suspicious rewrites are rejected, and fitted drafts are revalidated before topic memory. |
 | `postRefinerGate` | No | Re-runs revision and topic checks on refined drafts. Valid drafts continue; one failed validation can retry refinement, then fails closed. |
 | `finalTopicMemory` | No | Records the accepted final topic into the 48h cooldown after the direct path or a validated refined path. |
 
@@ -551,7 +551,7 @@ GRAFANA_DATABASE_URL=postgresql://postgres.[ref]:[PASSWORD]@aws-1-ap-south-1.poo
 - Use `280` for free/non-Premium standard posting.
 - Use a higher value such as `25000` only for Premium longer-post accounts that intentionally want long drafts.
 - PostPilot subtracts hidden fingerprint overhead automatically. With `X_POST_CHAR_LIMIT=280`, the visible target is 247 characters because 33 characters are reserved for tracking.
-- If the LLM still overshoots after the `too_long` refiner pass, the server trims to the last complete sentence when possible. Otherwise, it trims to a word boundary plus a period before adding the fingerprint.
+- Drafts are fitted to the visible budget before scoring/coherence. If the server safety trim still fires before adding the fingerprint, it re-runs scoring/coherence before saving the draft.
 
 Generate `HMAC_SECRET` and `TELEGRAM_WEBHOOK_SECRET` (64-char hex). Run this command **separately for each variable** and paste two different values; do not reuse the same secret for both:
 

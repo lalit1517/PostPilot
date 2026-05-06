@@ -26,7 +26,7 @@ import {
   resetCoherenceFailure,
 } from "./topicMemory.js";
 import { checkTopicCoherence } from "./topicCoherence.js";
-import { getVisibleDraftCharLimit } from "./postLimits.js";
+import { fitVisibleDraftToLimit, getVisibleDraftCharLimit } from "./postLimits.js";
 
 const AgentState = Annotation.Root({
   tweetId: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
@@ -120,6 +120,12 @@ function escapeForRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function containsRevisionAnchor(draftLower: string, anchor: string): boolean {
+  const normalized = anchor.toLowerCase();
+  const escaped = escapeForRegex(normalized);
+  return new RegExp(`(^|[^A-Za-z0-9_])${escaped}(?=$|[^A-Za-z0-9_])`, 'i').test(draftLower);
+}
+
 const GENERIC_REVISION_ANCHORS = new Set([
   'ai',
   'api',
@@ -130,6 +136,27 @@ const GENERIC_REVISION_ANCHORS = new Set([
   'ts',
   'llm',
 ]);
+
+function fitDraftBeforeScoring(draft: string, visibleDraftLimit: number, stage: string, tweetId: string): string {
+  const fitted = fitVisibleDraftToLimit(draft, visibleDraftLimit);
+  if (fitted.changed) {
+    logger.warn(
+      {
+        tweetId,
+        stage,
+        originalVisibleDraftLen: fitted.originalLength,
+        fittedVisibleDraftLen: fitted.finalLength,
+        visibleDraftLimit,
+        fitFunction: "fitVisibleDraftToLimit",
+        downstreamValidation: "diversityGate -> qualityScorer -> coherenceGate",
+        postFingerprintFunction: "appendFingerprint",
+      },
+      "Draft exceeded visible budget; fitVisibleDraftToLimit applied before scoring/coherence and before appendFingerprint",
+    );
+  }
+
+  return fitted.draft;
+}
 
 function isKnownOwnerDomainTerm(token: string): boolean {
   const normalized = token.toLowerCase();
@@ -235,8 +262,7 @@ function checkRevisionCompliance(
 
   const draftLower = stripInvisibleText(draft).toLowerCase();
   const missingAnchors = requiredAnchors.filter((anchor) => {
-    const normalized = anchor.toLowerCase();
-    return !new RegExp(`\\b${escapeForRegex(normalized)}\\b`, 'i').test(draftLower);
+    return !containsRevisionAnchor(draftLower, anchor);
   });
 
   if (missingAnchors.length > 0) {
@@ -894,7 +920,12 @@ HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fit
       draft = parts.slice(1).join('|').trim();
     }
 
-    draft = finalizeDraft(draft);
+    draft = fitDraftBeforeScoring(
+      finalizeDraft(draft),
+      visibleDraftLimit,
+      "contentGenerator",
+      state.tweetId,
+    );
 
     // Register format for this tweetId so future fingerprint reads attach the
     // FORMAT: prefix. Keyed by tweetId since that's how TweetVersion rows are
@@ -999,7 +1030,7 @@ function afterDiversityGate(state: typeof AgentState.State): "personaAdapter" | 
   return "qualityScorer";
 }
 
-async function qualityScorer(state: typeof AgentState.State) {
+export async function qualityScorer(state: typeof AgentState.State) {
   logger.info("Running qualityScorer (LLM Call 2)");
 
   const repetitionCount = state.structuralRepetitionCount ?? 0;
@@ -1056,7 +1087,7 @@ This is a feedback regeneration. Deduct 4 points if the tweet ignores the feedba
 }
 
 // Graph node — topic/content coherence check. Pure string, no LLM call.
-async function coherenceGate(state: typeof AgentState.State) {
+export async function coherenceGate(state: typeof AgentState.State) {
   const validation = validateDraftContext(state.draft, state);
   if (!validation.ok && validation.kind === 'revision') {
     logger.warn({
@@ -1159,7 +1190,12 @@ async function autoRefiner(state: typeof AgentState.State) {
     await recordLLMCall("gemini-2.5-flash", "refine");
 
     const res = await llm.invoke(prompt, { signal: AbortSignal.timeout(CALL_TIMEOUT) });
-    const refined = finalizeDraft((res.content as string).trim());
+    const refined = fitDraftBeforeScoring(
+      finalizeDraft((res.content as string).trim()),
+      getVisibleDraftCharLimit(),
+      "autoRefiner",
+      state.tweetId,
+    );
     const rejectReason = isSuspiciousDraft(refined);
     if (rejectReason) {
       logger.warn({ rejectReason, refinedLen: refined.length, originalLen: state.draft.length }, "Refined draft rejected by heuristic. Keeping original.");
