@@ -41,6 +41,7 @@ const AgentState = Annotation.Root({
   draft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   score: Annotation<number>({ reducer: (x, y) => y ?? x, default: () => 0 }),
   critique: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
+  scoreSource: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "scored" }),
   critiqueHints: Annotation<string[]>({ reducer: (x, y) => y ?? x, default: () => [] }),
   previousDraft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   currentFeedback: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
@@ -124,6 +125,14 @@ function containsRevisionAnchor(draftLower: string, anchor: string): boolean {
   const normalized = anchor.toLowerCase();
   const escaped = escapeForRegex(normalized);
   return new RegExp(`(^|[^A-Za-z0-9_])${escaped}(?=$|[^A-Za-z0-9_])`, 'i').test(draftLower);
+}
+
+const PRE_REFINE_SCORE_NOTE = "Score/critique are from the pre-refine draft; final draft was refined and accepted after validation without re-scoring.";
+
+function appendPreRefineScoreNote(critique: string): string {
+  const clean = (critique ?? '').trim();
+  if (clean.includes(PRE_REFINE_SCORE_NOTE)) return clean;
+  return [clean, PRE_REFINE_SCORE_NOTE].filter(Boolean).join(' ');
 }
 
 const GENERIC_REVISION_ANCHORS = new Set([
@@ -1083,7 +1092,7 @@ This is a feedback regeneration. Deduct 4 points if the tweet ignores the feedba
   const critiqueHints = parseCritiqueHints(critique, state.draft, score);
   logger.info({ score, critiqueHints, structuralRepetitionCount: repetitionCount }, "Parsed critique hints");
 
-  return { score, critique, critiqueHints };
+  return { score, critique, critiqueHints, scoreSource: "scored" };
 }
 
 // Graph node — topic/content coherence check. Pure string, no LLM call.
@@ -1202,7 +1211,11 @@ async function autoRefiner(state: typeof AgentState.State) {
       return { draft: state.draft, iterationCount: state.iterationCount + 1 };
     }
     logger.info({ refinedLen: refined.length }, "Refined draft accepted");
-    return { draft: refined, iterationCount: state.iterationCount + 1 };
+    return {
+      draft: refined,
+      iterationCount: state.iterationCount + 1,
+      scoreSource: refined === state.draft ? state.scoreSource : "pre_refine",
+    };
   } catch (err) {
     logger.warn("Auto Refiner timed out. Using original draft.");
     return { draft: state.draft, iterationCount: state.iterationCount + 1 };
@@ -1213,13 +1226,20 @@ function postRefinerGate(state: typeof AgentState.State) {
   const validation = validateDraftContext(state.draft, state);
   if (validation.ok) {
     resetCoherenceFailure(state.topic);
+    const usesPreRefineScore = state.scoreSource === "pre_refine";
     logger.info({
       reason: validation.reason,
       overlap: validation.overlap,
       domainMatches: validation.domainMatches,
       iterationCount: state.iterationCount,
+      scoreSource: state.scoreSource,
     }, "Post-refiner validation passed");
-    return { coherent: true, coherenceReason: validation.reason, validationFailed: false };
+    return {
+      coherent: true,
+      coherenceReason: validation.reason,
+      validationFailed: false,
+      ...(usesPreRefineScore ? { critique: appendPreRefineScoreNote(state.critique) } : {}),
+    };
   }
 
   const hint = validation.kind === 'revision' ? 'feedback_drift' : 'topic_drift';

@@ -152,7 +152,7 @@ The tweet becomes `GENERATION_RATE_LIMITED`, and Telegram receives a warning.
 | `personaAdapter` | No | Builds the full prompt: prohibitions, format directive, owner identity, persona/examples, topic plan, visible post budget, blacklist, tone, feedback rules, and anti-patterns. |
 | `contentGenerator` | Yes | Generates `TOPIC\|DRAFT`, optionally uses Google Search for current/named topics, applies revision/re-roll instructions, finalizes text, registers format, and short-circuits on rate limit. |
 | `diversityGate` | No | Enforces trigram + structural diversity against recent drafts. On first duplicate, changes format and re-routes through `personaAdapter`; accepted drafts clear reject state and update fingerprint memory. |
-| `qualityScorer` | Yes | Scores 1.0-10.0 with one decimal, applies structural and revision penalties, parses fixed critique hints, and returns the score for `server.ts` to persist. |
+| `qualityScorer` | Yes | Scores 1.0-10.0 with one decimal, applies structural and revision penalties, parses fixed critique hints, and returns the score for `server.ts` to persist. Accepted refined drafts keep this pre-refine score and label it in the critique instead of spending another scorer call. |
 | `coherenceGate` | No | Checks feedback compliance and topic coherence without LLM. User-supplied topics require direct overlap; failures lower high scores and add `topic_drift` / `feedback_drift` for refinement. |
 | `autoRefiner` | Conditional | Rewrites when score is low, coherence/revision fails, or draft is too long. Reuses prompt constraints; suspicious rewrites are rejected, and fitted drafts are revalidated before topic memory. |
 | `postRefinerGate` | No | Re-runs revision and topic checks on refined drafts. Valid drafts continue; one failed validation can retry refinement, then fails closed. |
@@ -368,7 +368,7 @@ Calls `evolvePersona()` — 1 LLM call with 22-hour cooldown. Deactivates previo
 | Model | Purpose |
 | :--- | :--- |
 | `Tweet` | Master record — topic, status (`PENDING`, `GENERATING`, `APPROVED`, `POSTED_CONFIRMED`, `RESOLVE_FAILED`, `GENERATION_RATE_LIMITED`, `ERROR`), fingerprint, `scheduled_slot_key` (unique UTC day/slot idempotency key for Cloudflare retries), live_url, posted_at, `telegram_chat_id` + `telegram_message_id` (persisted when the draft is sent to Telegram, and refreshed on manual ✅ Posted clicks, so the worker can edit the original message with final `Status: ✅ Marked as Posted` or `Status: ↩️ Not Posted` text) |
-| `TweetVersion` | Versioned drafts with `quality_score` (returned by qualityScorer and persisted by server when the version is created) |
+| `TweetVersion` | Versioned drafts with `quality_score` (returned by qualityScorer and persisted by server when the version is created; accepted refined drafts label pre-refine scores in `critique`) |
 | `Feedback` | User feedback with `weighted_score` (computed by feedbackWeighter) |
 | `Engagement` | Time-series snapshots — `likes`, `retweets`, `replies` at each interval. **`impressions` is always 0** — Twitter's free/public syndication endpoint doesn't expose impression counts. Column is unused today; kept as a future hook for when an X API key (paid Basic tier) is wired in, since that endpoint does return impressions. Surfaced via `/api/analytics` timeline as passthrough only — no consumer reads a non-zero value. |
 | `TweetOutcome` | Normalized 0-100 outcome score, tier (high/medium/low), peak metrics (`peak_likes`, `peak_retweets`, `peak_replies`), `quality_score` copy, `topic`, `time_of_day`, `day_of_week`. One per tweet, computed at 72h. Indexed on tier/time/day. |
@@ -1137,7 +1137,7 @@ PostPilot is designed as a **Safety-First Autonomous Agent**. It avoids aggressi
 
 ## ⚖️ Hard Constraints
 
-- **Typical 2-3 LLM calls** per tweet generation (contentGenerator, qualityScorer, autoRefiner when needed). Worst case is usually 4 with a diversity re-roll; a failed post-refiner validation can use one extra refiner call.
+- **Typical 2-3 LLM calls** per tweet generation (contentGenerator, qualityScorer, autoRefiner when needed). Worst case is usually 4 with a diversity re-roll; a failed post-refiner validation can use one extra refiner call. A rare server safety trim can add one scorer call before persistence.
 
 - **Max 1 LLM call/day** for persona evolution (offline, via EVOLVE_PERSONA task).
 
