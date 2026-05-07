@@ -1318,6 +1318,35 @@ app.get("/api/admin/rate-status", requireApiKey, async (_req, res) => {
   }
 });
 
+app.get("/api/admin/ip-info", requireApiKey, async (_req, res) => {
+  try {
+    const response = await fetch("https://ipinfo.io/json", {
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) {
+      logger.warn(
+        { status: response.status, statusText: response.statusText },
+        "IP info lookup returned non-OK response",
+      );
+      return res
+        .status(502)
+        .json({ success: false, error: "IP info lookup failed" });
+    }
+
+    const data = await response.json();
+    res.json({
+      success: true,
+      checkedAt: new Date().toISOString(),
+      source: "ipinfo.io",
+      data,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err: message }, "IP info lookup failed");
+    res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 app.get("/api/admin/failed-tasks", requireApiKey, async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
