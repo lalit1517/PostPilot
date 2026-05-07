@@ -4,7 +4,7 @@ import { prisma } from './db.js';
 import { logger } from './logger.js';
 
 const RPM_LIMIT = 5;
-const RPD_LIMIT = 38;
+const RPD_LIMIT = 19;
 const CACHE_TTL_MS = 5_000;
 
 interface LogRow {

@@ -62,6 +62,8 @@ const AgentState = Annotation.Root({
   rejectedFingerprint: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   rejectedDraft: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   rateLimited: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
+  generationFailed: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
+  generationFailureReason: Annotation<string>({ reducer: (x, y) => y ?? x, default: () => "" }),
   validationFailed: Annotation<boolean>({ reducer: (x, y) => y ?? x, default: () => false }),
 });
 
@@ -947,11 +949,13 @@ HINGLISH: Do NOT add "bhai", "yaar", or Hinglish just for flavor. Only if it fit
     return { topic, draft, iterationCount: 1 };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "Content Generator failed or timed out. Using fallback.");
+    logger.error({ err: message }, "Content Generator failed or timed out; stopping generation.");
     return {
-      topic: effectiveTopic || state.topic || "General Update",
-      draft: "still shipping. no updates, just commits.",
-      iterationCount: 1
+      topic: effectiveTopic || state.topic || "Generation Failed",
+      draft: "",
+      iterationCount: 1,
+      generationFailed: true,
+      generationFailureReason: message,
     };
   }
 }
@@ -1023,6 +1027,13 @@ async function diversityGate(state: typeof AgentState.State) {
 function afterContentGenerator(state: typeof AgentState.State): "diversityGate" | typeof END {
   if (state.rateLimited) {
     logger.warn("Rate-limited; skipping diversityGate and qualityScorer");
+    return END;
+  }
+  if (state.generationFailed) {
+    logger.warn(
+      { reason: state.generationFailureReason },
+      "Generation failed; skipping diversityGate and qualityScorer",
+    );
     return END;
   }
   return "diversityGate";

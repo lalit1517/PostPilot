@@ -347,6 +347,36 @@ async function processGenerationInBackground(
       return;
     }
 
+    if (finalState.generationFailed) {
+      logger.error(
+        {
+          tweetId,
+          reason: finalState.generationFailureReason,
+        },
+        "Generation provider failed; marking tweet and notifying Telegram",
+      );
+      await prisma.tweet.update({
+        where: { id: tweetId },
+        data: { status: "ERROR" },
+      });
+      const chatId = process.env.TELEGRAM_CHAT_ID;
+      if (chatId) {
+        try {
+          await sendTelegramMessage(
+            chatId,
+            `*Generation failed* - Gemini did not return a draft.\nTweet \`${tweetId}\` marked as \`ERROR\`.\nNo fallback draft was sent.`,
+          );
+        } catch (tgErr: unknown) {
+          const m = tgErr instanceof Error ? tgErr.message : String(tgErr);
+          logger.warn(
+            { tweetId, err: m },
+            "Failed to notify Telegram about provider failure",
+          );
+        }
+      }
+      return;
+    }
+
     if (finalState.validationFailed) {
       logger.error(
         {
@@ -1314,35 +1344,6 @@ app.get("/api/admin/rate-status", requireApiKey, async (_req, res) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err: message }, "Rate status lookup failed");
-    res.status(500).json({ success: false, error: "Internal server error" });
-  }
-});
-
-app.get("/api/admin/ip-info", requireApiKey, async (_req, res) => {
-  try {
-    const response = await fetch("https://ipinfo.io/json", {
-      headers: { Accept: "application/json" },
-    });
-    if (!response.ok) {
-      logger.warn(
-        { status: response.status, statusText: response.statusText },
-        "IP info lookup returned non-OK response",
-      );
-      return res
-        .status(502)
-        .json({ success: false, error: "IP info lookup failed" });
-    }
-
-    const data = await response.json();
-    res.json({
-      success: true,
-      checkedAt: new Date().toISOString(),
-      source: "ipinfo.io",
-      data,
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err: message }, "IP info lookup failed");
     res.status(500).json({ success: false, error: "Internal server error" });
   }
 });

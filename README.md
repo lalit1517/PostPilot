@@ -146,6 +146,9 @@ Accepted drafts clear `rejectedFingerprint` and move to `qualityScorer`, so the 
 The graph skips later gates, fingerprinting, and draft notification.
 The tweet becomes `GENERATION_RATE_LIMITED`, and Telegram receives a warning.
 
+**Provider-failure short-circuit edge:** when `generationFailed === true`, `contentGenerator -> END`.
+Gemini/provider failures mark the tweet `ERROR` and send a Telegram warning; no fallback draft is scored, fingerprinted, persisted, or sent.
+
 | Node | LLM Call | Behavior |
 | :--- | :--- | :--- |
 | `contextLoader` | No | Loads exemplars, weighted feedback, persona, length/blacklist data, recent fingerprints/topics, and classified trends. Builds a structured topic plan; automatic topics respect cooldown while explicit user topics set `forceTopic`. |
@@ -958,6 +961,7 @@ const RPD_LIMIT = 19;     // bump to your tier's RPD
 
 When exhausted, the graph short-circuits at [`contentGenerator`](src/agent.ts).
 It marks the tweet `GENERATION_RATE_LIMITED` and sends a Telegram warning instead of a junk draft.
+When Gemini/provider invocation fails before returning a draft, the graph also short-circuits at `contentGenerator`; `server.ts` marks the tweet `ERROR`, sends a Telegram warning, and skips fallback-draft scoring/delivery.
 The guard counts all models in one bucket; LangChain fallbacks handle provider-side per-model 429s.
 
 
